@@ -13,8 +13,6 @@ __pycache__/
 *.bin
 *.jar
 *.rdr
-vncorenlp/
-pretrained-models/
 
 # Environment variables
 .env
