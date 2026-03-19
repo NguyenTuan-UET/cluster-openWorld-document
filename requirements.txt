@@ -1,0 +1,33 @@
+# Combined Pipeline – requirements.txt
+# Python 3.12  |  venv: combined_pipeline/venv/
+#
+# Cài đặt:
+#   cd combined_pipeline
+#   source venv/bin/activate
+#   pip install -r requirements.txt
+
+# ── VnCoreNLP ─────────────────────────────────────────────────────────────────
+py_vncorenlp>=0.1.4
+
+# ── PyTorch (load .pt local) ──────────────────────────────────────────────────
+torch
+
+# ── HuggingFace Transformers (tokenizer + pipeline NER) ──────────────────────
+# NOTE: Phải dùng 4.x — transformers 5.x không tương thích với model ElectraAttention cũ
+transformers>=4.30,<5.0
+
+# ── Machine learning ──────────────────────────────────────────────────────────
+scikit-learn
+
+# ── Scientific computing ──────────────────────────────────────────────────────
+numpy
+
+# ── NLP bổ trợ ────────────────────────────────────────────────────────────────
+underthesea
+
+# ── Gemini API (phân nhóm chủ đề) ─────────────────────────────────────────────
+google-genai>=1.0
+python-dotenv
+
+# ── Gradio UI ─────────────────────────────────────────────────────────────────
+gradio

@@ -1,0 +1,27 @@
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.so
+.Python
+
+# Large files
+*.bin
+*.jar
+*.rdr
+vncorenlp/
+pretrained-models/
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+.claude/
+.DS_Store
