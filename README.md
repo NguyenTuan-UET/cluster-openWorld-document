@@ -35,7 +35,7 @@ Join thành đoạn văn tóm tắt
 ```
 combined_pipeline/
 ├── venv/                              ← virtual env riêng (Python 3.12)
-├── pretrained-models/                 ← Tất cả models (tải bằng download_models.py)
+├── pretrained-models/                 ← Tất cả models 
 │   ├── phobert.pt                     ← PhoBERT full model
 │   ├── ner-vietnamese-electra-base.pt ← NER-ELECTRA full model
 │   └── vncorenlp/                    ← VnCoreNLP JAR + models
@@ -49,29 +49,9 @@ combined_pipeline/
 │   └── vietnamese-stopwords-dash.txt
 ├── combined_pipeline.py               ← Class CombinedPipeline + CombinedResult
 ├── app.py                             ← Gradio web interface
-├── download_models.py                 ← Script tải tất cả models lần đầu
 ├── requirements.txt
 └── README.md
 ```
-
----
-
-## Cài đặt (lần đầu)
-
-```bash
-cd combined_pipeline
-
-# 1. Kích hoạt venv
-source venv/bin/activate
-
-# 2. Cài packages
-pip install -r requirements.txt
-
-# 3. Tải tất cả models (PhoBERT + NER-ELECTRA + VnCoreNLP)
-python download_models.py
-```
-
-> **Lưu ý:** Sau khi clone repo, cần chạy `download_models.py` để tải tất cả models về `pretrained-models/`.
 
 ---
 
@@ -116,17 +96,6 @@ print(result)
 | `keywords`          | `List[Tuple[str,float]]` | Từ khóa + điểm số, sắp xếp giảm dần         |
 
 ---
-
-## Sử dụng – Gradio Web App
-
-```bash
-cd combined_pipeline
-source venv/bin/activate
-python app.py
-```
-
-Truy cập địa chỉ được in ra terminal (thường `http://127.0.0.1:7860`).
-
 ### Tham số trên giao diện
 
 | Tham số          | Mặc định | Mô tả                                          |
@@ -139,11 +108,19 @@ Truy cập địa chỉ được in ra terminal (thường `http://127.0.0.1:786
 
 ---
 
-## Chạy demo nhanh
-
+## Sử dụng – Gradio Web App
 ```bash
-cd combined_pipeline
+python3 -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
+```
+
+## Demo nhanh
+```bash
 python combined_pipeline.py
 ```
 
+## Sử dụng – Gradio Web App
+```bash
+python app.py
+```
