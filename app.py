@@ -3,14 +3,20 @@ Gradio App - Combined Pipeline
 Tóm tắt (TextRank) + Từ khóa (KeyBERT-Vi) + Phân nhóm chủ đề (Gemini)
 ========================================================================
 Chạy:
-    cd combined_pipeline
     source venv/bin/activate
     python app.py
 """
 
+import sys
+from pathlib import Path
+
+# Ensure project root is in sys.path so 'backend' module is importable
+sys.path.insert(0, str(Path(__file__).parent))
+
 import gradio as gr
-from combined_pipeline import CombinedPipeline, CombinedResult
-from gemini_service import TopicLabel
+from backend.cluster.combined_pipeline import CombinedPipeline, CombinedResult
+from backend.cluster.gemini_service import GeminiService, AnalyzedDocument, DocumentCluster
+import time
 from typing import List, Optional
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -23,8 +29,17 @@ if gr.NO_RELOAD:
     print("=" * 60)
     _pipeline = CombinedPipeline(enable_clustering=True)
     _pipeline.load()
+
+    # ── Gemini Service — theo y hệt docucluster-ai ──
+    _gemini = GeminiService()
+
+    # ── In-memory state (y hệt React state trong docucluster-ai App.tsx) ──
+    _all_documents: List[AnalyzedDocument] = []   # tất cả docs đã analyzed
+    _clusters: List[DocumentCluster] = []           # clusters hiện có (label + documents)
+
     print("=" * 60)
     print("  ✅ Server sẵn sàng!")
+    print(f"  📦 Clusters: 0 | Documents: 0")
     print("=" * 60)
 
 
@@ -408,6 +423,140 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                     t2_ng_lo, t2_ng_hi, t2_min_freq, t2_diversify,
                 ],
                 outputs=[t2_details, t2_clusters, t2_stats],
+            )
+
+        # ══════════════════════════════════════════════════════════════════════
+        # TAB 3: Label Space — Nhập document mới, phân loại tự động
+        #  (y hệt docucluster-ai: 3 bước extract → assign → cluster)
+        # ══════════════════════════════════════════════════════════════════════
+        with gr.TabItem("🏷️ Label Space (Phân loại)"):
+
+            gr.Markdown(
+                """
+                ### 🏷️ Phân loại document — theo luồng docucluster-ai
+                **3 bước:** Trích xuất keyphrases → Gán cluster hiện có → Tạo cluster mới
+                """
+            )
+
+            with gr.Row(equal_height=False):
+                with gr.Column(scale=3):
+                    t3_docs = gr.Textbox(
+                        label="📄 Văn bản (ngăn cách bằng ===)",
+                        placeholder="=== Tiêu đề 1\nNội dung…\n\n=== Tiêu đề 2\nNội dung…",
+                        lines=12,
+                    )
+                    t3_btn = gr.Button(
+                        "▶  Phân tích & Phân loại", variant="primary",
+                    )
+
+                with gr.Column(scale=1, min_width=240):
+                    gr.Markdown("**Luồng xử lý:**")
+                    gr.Markdown(
+                        """
+                        1. **Extract** — Gemini trích xuất keyphrases + summary
+                        2. **Assign** — Gán vào clusters hiện có (BE STRICT)
+                        3. **Cluster** — Gom nhóm doc mới thành clusters MỚI
+                        """
+                    )
+
+            gr.Markdown("---")
+
+            # ── Kết quả: Clusters ──
+            t3_clusters = gr.Markdown(
+                label="🏷️ Clusters",
+                value="*(Nhấn 'Phân tích' để xem)*",
+            )
+
+            # ── Kết quả: Chi tiết từng document ──
+            t3_details = gr.Textbox(
+                label="📄 Chi tiết từng document",
+                lines=15,
+                interactive=False,
+            )
+
+            # ── Hàm xử lý chính ──
+            def process_label_space(docs_text: str):
+                global _clusters, _all_documents
+                if not docs_text.strip():
+                    return "⚠️ Vui lòng nhập văn bản.", "*(Chưa có kết quả)*"
+
+                # ── Parse documents ──
+                texts: List[str] = []
+                titles: List[str] = []
+                blocks = docs_text.split("===")
+                for block in blocks:
+                    block = block.strip()
+                    if not block:
+                        continue
+                    lines = block.split("\n", 1)
+                    title = lines[0].strip() if lines else ""
+                    body = lines[1].strip() if len(lines) > 1 else lines[0].strip()
+                    if not body:
+                        continue
+                    titles.append(title)
+                    texts.append(body)
+
+                if not texts:
+                    return "⚠️ Không tìm thấy tài liệu. Dùng '===' để ngăn cách.", "*(Chưa có kết quả)*"
+
+                # ── Gọi process_and_cluster_new_documents (y hệt docucluster-ai) ──
+                result = _gemini.process_and_cluster_new_documents(
+                    texts=texts,
+                    existing_clusters=_clusters,
+                    existing_documents=_all_documents,
+                    file_names=titles,
+                )
+
+                # ── Cập nhật global state ──
+                _clusters = result["final_clusters"]
+                _all_documents = result["all_documents"]
+
+                # ── Format clusters output ──
+                cluster_lines = []
+                for c in sorted(_clusters, key=lambda x: len(x.documents), reverse=True):
+                    doc_ids = ", ".join([f"`{d.id}`" for d in c.documents])
+                    keyphrases = ", ".join(set(kw for d in c.documents for kw in d.keyphrases[:3]))
+                    cluster_lines.append(
+                        f"🏷️ **{c.label}** ({len(c.documents)} docs)\n"
+                        f"   📄 {doc_ids}\n"
+                        f"   🔑 {keyphrases}"
+                    )
+                clusters_out = "\n\n".join(cluster_lines) if cluster_lines else "*(Chưa có cluster nào)*"
+
+                # ── Format details output ──
+                detail_lines = []
+                for d in _all_documents:
+                    kw_str = ", ".join(d.keyphrases[:5])
+                    # Tìm cluster chứa doc này
+                    doc_cluster = next((c.label for c in _clusters if d in c.documents), "—")
+                    detail_lines.append(
+                        f"{'─' * 50}\n"
+                        f"📄 [{d.id}] {d.file_name or '(no title)'}\n"
+                        f"   📝 Summary: {d.summary[:100]}{'…' if len(d.summary) > 100 else ''}\n"
+                        f"   🔑 Keyphrases: {kw_str}\n"
+                        f"   🏷️ Cluster: {doc_cluster}"
+                    )
+                details_out = "\n".join(detail_lines) if detail_lines else "*(Chưa có document nào)*"
+
+                stats = f"📊 **{len(_all_documents)}** documents | **{len(_clusters)}** clusters"
+                return clusters_out + "\n\n" + stats, details_out
+
+            t3_btn.click(
+                fn=process_label_space,
+                inputs=[t3_docs],
+                outputs=[t3_clusters, t3_details],
+            )
+
+            # ── Nút Reset ──
+            def reset_all():
+                global _clusters, _all_documents
+                _clusters = []
+                _all_documents = []
+                return "✅ Đã reset! Clusters: 0, Documents: 0", "*(Đã reset — nhấn 'Phân tích' để bắt đầu)*"
+
+            gr.Button("🗑️ Reset Clusters & Documents", size="sm").click(
+                fn=reset_all,
+                outputs=[t3_clusters, t3_details],
             )
 
     # ── Footer ────────────────────────────────────────────────────────────────

@@ -1,20 +1,6 @@
 """
 Combined Pipeline - Tóm tắt + Trích xuất từ khóa + Phân nhóm chủ đề
 =====================================================================
-Cấu trúc thư mục (self-contained):
-
-  combined_pipeline/
-  ├── venv/
-  ├── vncorenlp/
-  ├── pretrained-models/
-  │   ├── phobert.pt
-  │   └── ner-vietnamese-electra-base.pt
-  ├── textrank/
-  ├── keybert/
-  ├── gemini_service.py          ← Gemini API cho phân nhóm
-  ├── combined_pipeline.py       ← file này
-  ├── app.py
-  └── .env                       ← GEMINI_API_KEY
 
 Luồng xử lý:
   1. TextRankFacade.summarize(text)   → List[str]  (câu quan trọng)
@@ -29,30 +15,31 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
-# ─── Đường dẫn nội bộ (tất cả đều nằm trong combined_pipeline/) ──────────────
-BASE_DIR            = os.path.dirname(os.path.abspath(__file__))
-TEXTRANK_DIR        = os.path.join(BASE_DIR, "textrank")
-KEYBERT_DIR         = os.path.join(BASE_DIR, "keybert")
-PRETRAINED_DIR      = os.path.join(BASE_DIR, "pretrained-models")
+# ─── Đường dẫn nội bộ (tất cả đều nằm trong backend/) ───────────────────────
+PROJECT_ROOT        = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BACKEND_DIR         = os.path.join(PROJECT_ROOT, "backend")
+TEXTRANK_DIR        = os.path.join(BACKEND_DIR, "cluster", "textrank")
+KEYBERT_DIR         = os.path.join(BACKEND_DIR, "cluster", "keybert")
+PRETRAINED_DIR      = os.path.join(PROJECT_ROOT, "pretrained-models")
 VNCORENLP_DIR       = os.path.join(PRETRAINED_DIR, "vncorenlp")
 PHOBERT_PT          = os.path.join(PRETRAINED_DIR, "phobert.pt")
 NER_PT              = os.path.join(PRETRAINED_DIR, "ner-vietnamese-electra-base.pt")
 
 # ─── Thêm sys.path để import được textrank/ và keybert/ ──────────────────────
-for p in [TEXTRANK_DIR, KEYBERT_DIR]:
+CLUSTER_DIR = os.path.join(BACKEND_DIR, "cluster")
+for p in [TEXTRANK_DIR, CLUSTER_DIR, KEYBERT_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
 # ─── Import từ textrank/ ──────────────────────────────────────────────────────
-from textrank_facade import TextRankFacade          # noqa: E402
-from stopwords.vietnamese import Vietnamese         # noqa: E402
+from textrank.textrank_facade import TextRankFacade          # noqa: E402
+from textrank.stopwords.vietnamese import Vietnamese         # noqa: E402
 
 # ─── Import từ keybert/ ───────────────────────────────────────────────────────
-from pipeline import KeywordExtractorPipeline       # noqa: E402
+from keybert.pipeline import KeywordExtractorPipeline       # noqa: E402
 
-# ─── Import Gemini service (phân nhóm chủ đề) ────────────────────────────────
-sys.path.insert(0, BASE_DIR)
-from gemini_service import GeminiService, TopicLabel, ClassifyResult  # noqa: E402
+# ─── Import Gemini service (phân nhóm chủ đề) ──────────────────────────────────
+from backend.cluster.gemini_service import GeminiService, TopicLabel, ClassifyResult  # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────────────

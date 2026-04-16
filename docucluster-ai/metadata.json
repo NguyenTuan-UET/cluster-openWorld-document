@@ -1,0 +1,5 @@
+{
+  "name": "DocuCluster AI",
+  "description": "Intelligent PDF workflow: Upload documents, extract keywords, and automatically group them based on semantic matching using Gemini 2.5 Flash.",
+  "requestFramePermissions": []
+}

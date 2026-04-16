@@ -31,3 +31,9 @@ python-dotenv
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 gradio
+
+# ── Backend API ──────────────────────────────────────────────────────────────
+fastapi
+uvicorn[standard]
+python-multipart
+PyPDF2

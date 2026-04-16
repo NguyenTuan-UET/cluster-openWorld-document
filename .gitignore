@@ -23,3 +23,12 @@ __pycache__/
 .idea/
 .claude/
 .DS_Store
+
+# Frontend build
+frontend/dist/
+frontend/node_modules/
+
+# Backend cache
+backend/__pycache__/
+backend/cluster/__pycache__/
+backend/cluster/**/__pycache__/
