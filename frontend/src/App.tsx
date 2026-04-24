@@ -32,26 +32,26 @@ export default function App() {
         setClusters(s.clusters || []);
         if (s.documents?.length > 0) setStatus(ProcessingStatus.COMPLETED);
       })
-      .catch(() => {});
+      .catch(() => { });
   }, []);
 
   const handleFilesAdded = useCallback(async (files: File[]) => {
     setError(null);
-    setProgress({ processed: 0, total: files.length });
+    const total = files.length;
+    setProgress({ processed: 0, total });
+    setStatus(ProcessingStatus.EXTRACTING);
 
     try {
-      // Step 1: Extract
-      setStatus(ProcessingStatus.EXTRACTING);
+      // Phase 1: Đọc tất cả files (local)
       const texts: string[] = [];
       const fileNames: string[] = [];
-
-      for (let i = 0; i < files.length; i++) {
+      for (let i = 0; i < total; i++) {
         texts.push(await readFileText(files[i]));
         fileNames.push(files[i].name);
-        setProgress({ processed: i + 1, total: files.length });
+        setProgress({ processed: i + 1, total });  // 1/n, 2/n — đọc file
       }
 
-      // Step 2+3: Cluster
+      // Phase 2: Gọi backend (TextRank + KeyBERT + LLM clustering)
       setStatus(ProcessingStatus.CLUSTERING);
       const result: any = await extractAndCluster(texts, fileNames);
 
@@ -84,7 +84,7 @@ export default function App() {
       <div className="flex items-center gap-2 px-4 py-1.5 bg-indigo-50 rounded-full border border-indigo-100">
         <Sparkles size={14} className="text-indigo-600" />
         <span className="text-xs font-medium text-indigo-600">
-          TextRank + KeyBERT • Gemini Clustering
+          TextRank + KeyBERT • Kilo AI Clustering
         </span>
       </div>
 
@@ -114,29 +114,77 @@ export default function App() {
   );
 
   // ── Loading overlay ──
-  const renderLoading = () => (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/10 backdrop-blur-sm">
-      <div className="bg-white rounded-2xl shadow-xl p-8 flex flex-col items-center space-y-4 min-w-72">
-        <div className="relative">
-          <div className="w-16 h-16 border-4 border-slate-200 border-t-indigo-600 rounded-full animate-spin" />
-          <BrainCircuit
-            size={24}
-            className="absolute inset-0 m-auto text-indigo-600 animate-pulse"
-          />
-        </div>
-        <div className="text-center">
-          <p className="text-sm font-semibold text-slate-700">
-            {status === ProcessingStatus.EXTRACTING ? 'Đang trích xuất nội dung' : 'Đang phân cụm tài liệu'}
-          </p>
-          {progress.total > 0 && (
-            <p className="text-xs text-slate-400 mt-1">
-              {progress.processed}/{progress.total} files
-            </p>
-          )}
+  const renderLoading = () => {
+    const isExtracting = status === ProcessingStatus.EXTRACTING;
+    const pct = progress.total > 0
+      ? isExtracting
+        ? Math.round((progress.processed / progress.total) * 50)   // Phase 1: 0→50%
+        : 50 + Math.round((progress.processed / progress.total) * 50)  // never shown
+      : 0;
+
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/10 backdrop-blur-sm">
+        <div className="bg-white rounded-2xl shadow-xl p-8 flex flex-col items-center space-y-5 min-w-80">
+          {/* Spinner + icon */}
+          <div className="relative">
+            <div className="w-16 h-16 border-4 border-slate-200 border-t-indigo-600 rounded-full animate-spin" />
+            <BrainCircuit
+              size={24}
+              className="absolute inset-0 m-auto text-indigo-600 animate-pulse"
+            />
+          </div>
+
+          {/* Phase label */}
+          <div className="flex gap-2">
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isExtracting
+                ? 'bg-indigo-100 text-indigo-700'
+                : 'bg-slate-100 text-slate-400 line-through'
+              }`}>
+              1 — Đọc file
+            </span>
+            <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${!isExtracting
+                ? 'bg-amber-100 text-amber-700'
+                : 'bg-slate-100 text-slate-400'
+              }`}>
+              2 — Phân nhóm
+            </span>
+          </div>
+
+          {/* Status text */}
+          <div className="text-center space-y-1">
+            {isExtracting ? (
+              <>
+                <p className="text-sm font-semibold text-slate-700">Đang đọc tài liệu…</p>
+                {progress.total > 0 && (
+                  <p className="text-xs text-slate-500">
+                    Tài liệu&nbsp;
+                    <span className="font-bold text-indigo-600">{progress.processed}</span>
+                    &nbsp;/&nbsp;
+                    <span className="font-bold">{progress.total}</span>&nbsp;đã đọc
+                  </p>
+                )}
+              </>
+            ) : (
+              <>
+                <p className="text-sm font-semibold text-slate-700">Đang phân nhóm theo chủ đề…</p>
+                <p className="text-xs text-slate-500">
+                  TextRank + KeyBERT + Kilo AI · Multi-label
+                </p>
+              </>
+            )}
+          </div>
+
+          {/* Progress bar */}
+          <div className="w-full bg-slate-100 rounded-full h-1.5 overflow-hidden">
+            <div
+              className="h-1.5 rounded-full transition-all duration-500 ease-out bg-indigo-600"
+              style={{ width: isExtracting ? `${pct}%` : '100%' }}
+            />
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  };
 
   // ── Results view ──
   const renderResults = () => (

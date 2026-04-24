@@ -25,8 +25,8 @@ numpy
 # ── NLP bổ trợ ────────────────────────────────────────────────────────────────
 underthesea
 
-# ── Gemini API (phân nhóm chủ đề) ─────────────────────────────────────────────
-google-genai>=1.0
+# ── Kilo AI / OpenAI SDK (phân nhóm chủ đề — MiniMax via Kilo AI) ────────────
+openai>=1.0
 python-dotenv
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────

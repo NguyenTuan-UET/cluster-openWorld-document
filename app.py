@@ -1,6 +1,6 @@
 """
 Gradio App - Combined Pipeline
-Tóm tắt (TextRank) + Từ khóa (KeyBERT-Vi) + Phân nhóm chủ đề (Gemini)
+Tóm tắt (TextRank) + Từ khóa (KeyBERT-Vi) + Phân nhóm chủ đề (Kilo AI / MiniMax)
 ========================================================================
 Chạy:
     source venv/bin/activate
@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import gradio as gr
 from backend.cluster.combined_pipeline import CombinedPipeline, CombinedResult
-from backend.cluster.gemini_service import GeminiService, AnalyzedDocument, DocumentCluster
+from backend.cluster.llm_service import LLMService, AnalyzedDocument, DocumentCluster
 import time
 from typing import List, Optional
 
@@ -30,8 +30,8 @@ if gr.NO_RELOAD:
     _pipeline = CombinedPipeline(enable_clustering=True)
     _pipeline.load()
 
-    # ── Gemini Service — theo y hệt docucluster-ai ──
-    _gemini = GeminiService()
+    # ── LLM Service (Kilo AI / MiniMax) — theo y hệt docucluster-ai ──
+    _gemini = LLMService()
 
     # ── In-memory state (y hệt React state trong docucluster-ai App.tsx) ──
     _all_documents: List[AnalyzedDocument] = []   # tất cả docs đã analyzed
@@ -203,7 +203,7 @@ def process_batch(
             )
         cluster_output = "\n\n".join(cluster_lines)
     else:
-        cluster_output = "(Không có nhãn — Gemini không khả dụng hoặc chưa bật clustering)"
+        cluster_output = "(Không có nhãn — Kilo AI không khả dụng hoặc chưa bật clustering)"
 
     # ── Stats ─────────────────────────────────────────────────────────────────
     stats_md = (
@@ -266,7 +266,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
         """
         # 🇻🇳 Vietnamese NLP Pipeline
         ### Tóm tắt văn bản · Trích xuất từ khóa · Phân nhóm chủ đề
-        **Luồng:** Văn bản → ✂️ TextRank → 🔑 KeyBERT-Vi (PhoBERT + NER) → 🏷️ Gemini (clustering)
+        **Luồng:** Văn bản → ✂️ TextRank → 🔑 KeyBERT-Vi (PhoBERT + NER) → 🏷️ Kilo AI (clustering)
         """
     )
 
@@ -359,7 +359,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 """
                 ### 🏷️ Phân nhóm tài liệu theo chủ đề
                 Nhập nhiều tài liệu, pipeline sẽ **tóm tắt + trích xuất từ khóa** cho từng tài liệu,
-                sau đó dùng **Gemini AI** phân nhóm chúng theo chủ đề.
+                sau đó dùng **Kilo AI (MiniMax)** phân nhóm chúng theo chủ đề.
 
                 **Cách nhập:** Dùng `===` để ngăn cách tài liệu. Dòng sau `===` là tiêu đề.
                 """
@@ -453,7 +453,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                     gr.Markdown("**Luồng xử lý:**")
                     gr.Markdown(
                         """
-                        1. **Extract** — Gemini trích xuất keyphrases + summary
+                        1. **Extract** — Kilo AI trích xuất keyphrases + summary
                         2. **Assign** — Gán vào clusters hiện có (BE STRICT)
                         3. **Cluster** — Gom nhóm doc mới thành clusters MỚI
                         """
@@ -499,12 +499,28 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 if not texts:
                     return "⚠️ Không tìm thấy tài liệu. Dùng '===' để ngăn cách.", "*(Chưa có kết quả)*"
 
-                # ── Gọi process_and_cluster_new_documents (y hệt docucluster-ai) ──
+                # ── STAGE 1+2: TextRank + KeyBERT (local, KHÔNG dùng LLM) ──
+                import uuid as _uuid
+                from backend.cluster.llm_service import AnalyzedDocument as _AD
+                analyzed_docs = []
+                for i, (text, title) in enumerate(zip(texts, titles)):
+                    pipeline_result = _pipeline.run(text=text, title=title or None)
+                    doc = _AD(
+                        id=f"doc-{_uuid.uuid4().hex[:8]}",
+                        file_name=title or f"doc-{i}",
+                        keyphrases=[kw for kw, _ in pipeline_result.keywords],
+                        summary=pipeline_result.summary_text,
+                    )
+                    analyzed_docs.append(doc)
+                    print(f"  ✅ [{i+1}/{len(texts)}] {title or '(no title)'}: {len(doc.keyphrases)} keyphrases")
+
+                # ── STAGE 3: LLM chỉ làm clustering (KHÔNG extract) ──
                 result = _gemini.process_and_cluster_new_documents(
                     texts=texts,
                     existing_clusters=_clusters,
                     existing_documents=_all_documents,
                     file_names=titles,
+                    analyzed_docs=analyzed_docs,   # ⭐ bỏ qua LLM extract
                 )
 
                 # ── Cập nhật global state ──
@@ -564,7 +580,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
         """
         <small>
         **Gợi ý:** Top N = 8–12 · Ngram (1, 3) · Min freq = 1 (văn bản ngắn), 2–3 (văn bản dài) · Diversify = đa dạng chủ đề<br>
-        **Phân nhóm:** Cần có `GEMINI_API_KEY` trong file `.env` để bật tính năng clustering.
+        **Phân nhóm:** Cần có `KILO_API_KEY` trong file `.env` để bật tính năng clustering.
         </small>
         """
     )

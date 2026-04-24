@@ -81,7 +81,7 @@ def get_doc_embeddings(segmentised_doc, tokenizer, phobert, stopwords):
     for i, sentence in enumerate(segmentised_doc):
         sent_removed_stopwords = ' '.join([word for word in sentence.split() if word not in stopwords])
 
-        sentence_embedding = tokenizer.encode(sent_removed_stopwords)
+        sentence_embedding = tokenizer.encode(sent_removed_stopwords, truncation=True, max_length=256)
         input_ids = torch.tensor([sentence_embedding])
         with torch.no_grad():
             features = phobert(input_ids)
@@ -116,7 +116,7 @@ def compute_ngram_embeddings(tokenizer, phobert, ngram_list):
         ngram_copy = ngram
         if ngram.isupper():
             ngram_copy = ngram.lower()
-        word_embedding = tokenizer.encode(ngram_copy)
+        word_embedding = tokenizer.encode(ngram_copy, truncation=True, max_length=256)
         input_ids = torch.tensor([word_embedding])
         with torch.no_grad():
             word_features = phobert(input_ids)
@@ -129,7 +129,9 @@ def compute_ngram_similarity(ngram_list, ngram_embeddings, doc_embedding):
     ngram_similarity_dict = {}
 
     for ngram in ngram_list:
-        similarity_score = cosine_similarity(ngram_embeddings[ngram], doc_embedding.T).flatten()[0]
+        a = ngram_embeddings[ngram].flatten().detach().cpu().numpy()
+        b = doc_embedding.flatten().detach().cpu().numpy()
+        similarity_score = cosine_similarity(a, b).flatten()[0]
         ngram_similarity_dict[ngram] = similarity_score
 
     return ngram_similarity_dict

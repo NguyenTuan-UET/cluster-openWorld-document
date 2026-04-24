@@ -26,3 +26,15 @@ export async function extractAndCluster(texts: string[], fileNames?: string[]) {
     }),
   );
 }
+
+/** Gửi 1 tài liệu duy nhất — dùng để cập nhật tiến trình từng doc một */
+export async function extractAndClusterOne(text: string, fileName: string) {
+  return handleResponse<{ final_clusters: any[]; all_documents: any[] }>(
+    await fetch(`${API_BASE}/process-and-cluster`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: [text], file_names: [fileName] }),
+    }),
+  );
+}
+

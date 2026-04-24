@@ -19,20 +19,28 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from typing import List, Optional
+from typing import List, Optional, Dict
 import uuid
+
+# ── In-memory state (module-level) ───────────────────────────────────────────
+_all_documents: List[dict] = []
+_clusters: List[dict] = []
+_pipeline_loaded = False
+_gemini_loaded = False
+_pipeline = None   # type: ignore
+_gemini = None     # type: ignore
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _pipeline_loaded, _gemini_loaded
+    global _pipeline_loaded, _gemini_loaded, _pipeline, _gemini
     print("=" * 60)
     print("  NLP Pipeline API — Đang khởi động…")
     print("=" * 60)
 
     try:
         from backend.cluster.combined_pipeline import CombinedPipeline
-        global _pipeline
-        _pipeline = CombinedPipeline(enable_clustering=True)
+        _pipeline = CombinedPipeline(enable_clustering=False)  # Stage 1+2 only
         _pipeline.load()
         _pipeline_loaded = True
         print("✅ CombinedPipeline loaded!")
@@ -40,14 +48,13 @@ async def lifespan(app: FastAPI):
         print(f"⚠️ CombinedPipeline error: {e}")
 
     try:
-        from backend.cluster.gemini_service import GeminiService
-        global _gemini
-        _gemini = GeminiService(model="gemini-2.5-flash")
+        from backend.cluster.llm_service import LLMService
+        _gemini = LLMService()
         _gemini._ensure_client()
         _gemini_loaded = True
-        print("✅ Gemini Service loaded!")
+        print("✅ LLM Service (Kilo AI) loaded!")
     except Exception as e:
-        print(f"⚠️ Gemini error: {e}")
+        print(f"⚠️ LLM Service error: {e}")
 
     print("=" * 60)
     print("  ✅ Server sẵn sàng!")
@@ -58,7 +65,6 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="NLP Pipeline API", lifespan=lifespan)
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -66,13 +72,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# ── In-memory state ──────────────────────────────────────────────────────────
-_all_documents: List[dict] = []
-_clusters: List[dict] = []
-_pipeline_loaded = False
-_gemini_loaded = False
-_pipeline = None  # type: ignore
 
 
 # ── Pydantic schemas ────────────────────────────────────────────────────────
@@ -83,7 +82,12 @@ class ExtractRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "ok", "message": "NLP Pipeline API", "pipeline": _pipeline_loaded, "gemini": _gemini_loaded}
+    return {
+        "status": "ok",
+        "message": "NLP Pipeline API",
+        "pipeline": _pipeline_loaded,
+        "gemini": _gemini_loaded,
+    }
 
 
 @app.get("/state")
@@ -101,105 +105,163 @@ def reset_state():
 
 @app.post("/process-and-cluster")
 def process_and_cluster(req: ExtractRequest):
-    global _all_documents, _clusters, _pipeline
+    """
+    Batch clustering với multi-label:
+
+      Phase 1 (local): TextRank + KeyBERT cho TẤT CẢ tài liệu → keyphrases + summary
+      Phase 2 (LLM):
+        a. Gán mỗi doc vào NHIỀU clusters hiện có (multi-label)
+        b. Docs không khớp cluster nào → tạo clusters mới
+        c. Cập nhật label space và trả về kết quả
+    """
+    global _all_documents, _clusters, _pipeline, _gemini
 
     if not req.texts:
         raise HTTPException(status_code=400, detail="texts is required")
-
-    from backend.cluster.gemini_service import GeminiService, AnalyzedDocument, DocumentCluster
-
-    # STEP 1: Extract bằng CombinedPipeline (reuse từ startup)
-    print(f"Processing {len(req.texts)} documents...")
     if _pipeline is None:
-        raise HTTPException(status_code=500, detail="Pipeline chưa load. Kiểm tra backend startup.")
-    pipeline = _pipeline
+        raise HTTPException(status_code=500, detail="Pipeline chưa load.")
+    if _gemini is None:
+        raise HTTPException(status_code=500, detail="LLM Service chưa load. Kiểm tra KILO_API_KEY.")
 
+    from backend.cluster.llm_service import AnalyzedDocument, DocumentCluster
+
+    n = len(req.texts)
+    print(f"\n{'=' * 60}")
+    print(f"  Batch processing — {n} tài liệu")
+    print(f"{'=' * 60}")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 1: TextRank + KeyBERT cho TẤT CẢ (local, không LLM)
+    # ═══════════════════════════════════════════════════════════════════════
+    print(f"\n📊 Phase 1/2 — Trích xuất từ khóa (TextRank + KeyBERT)…")
     analyzed_docs: List[AnalyzedDocument] = []
+
     for i, text in enumerate(req.texts):
         file_name = req.file_names[i] if req.file_names and i < len(req.file_names) else f"doc-{i}"
-        result = pipeline.run(text=text, title=file_name)
-
+        pipeline_result = _pipeline.run(text=text, title=file_name)
         doc = AnalyzedDocument(
             id=f"doc-{uuid.uuid4().hex[:8]}",
             file_name=file_name,
-            keyphrases=[kw for kw, _ in result.keywords],
-            summary=result.summary_text,
+            keyphrases=[kw for kw, _ in pipeline_result.keywords],
+            summary=pipeline_result.summary_text,
         )
         analyzed_docs.append(doc)
-        print(f"  ✅ {file_name}: {len(result.keywords)} keywords")
+        kw_preview = ", ".join(doc.keyphrases[:5]) + ("…" if len(doc.keyphrases) > 5 else "")
+        print(f"  [{i+1}/{n}] {file_name}: {len(doc.keyphrases)} từ khóa → {kw_preview}")
 
-    # STEP 2: Assign to existing clusters (có thể rename label)
-    assignments: dict = {}
-    renames: dict = {}
-    unassigned_docs: List[AnalyzedDocument] = list(analyzed_docs)
+    # ═══════════════════════════════════════════════════════════════════════
+    # PHASE 2: LLM — Multi-label clustering
+    # ═══════════════════════════════════════════════════════════════════════
+    print(f"\n🤖 Phase 2/2 — LLM phân nhóm multi-label…")
 
-    if _clusters and analyzed_docs:
-        try:
-            gemini = GeminiService(model="gemini-2.5-flash")
-            gemini._ensure_client()
-            existing = [DocumentCluster(label=c["label"], documents=[]) for c in _clusters]
-            for c in _clusters:
-                for d in c.get("documents", []):
-                    existing[next(i for i, x in enumerate(existing) if x.label == c["label"])].documents.append(
-                        AnalyzedDocument(id=d["id"], file_name=d["fileName"], keyphrases=d["keyphrases"], summary=d["summary"])
-                    )
-            result = gemini.assign_to_existing_clusters(analyzed_docs, existing)
-            assignments = result["assignments"]
-            renames = result.get("renames", {})
-            unassigned_docs = result["unassigned"]
-        except Exception as e:
-            print(f"⚠️ Assign error: {e}")
+    # doc_id → list of labels (có thể nhiều label)
+    doc_to_labels: Dict[str, List[str]] = {d.id: [] for d in analyzed_docs}
 
-    # STEP 3: Cluster unassigned
-    new_clusters: List[DocumentCluster] = []
-    if unassigned_docs:
-        try:
-            gemini = GeminiService(model="gemini-2.5-flash")
-            gemini._ensure_client()
-            new_clusters = gemini.cluster_unassigned_documents(unassigned_docs)
-        except Exception as e:
-            print(f"⚠️ Cluster error: {e}")
-
-    # ── Merge: existing + assigned + new ──
-    final_map: dict = {}
-
-    # 1. Copy existing clusters
-    for c in _clusters:
-        final_map[c["label"]] = {"label": c["label"], "documents": list(c.get("documents", []))}
-
-    # 2. Apply renames (old_label → new_label) nếu Gemini đề xuất
-    for old_label, new_label in renames.items():
-        if old_label in final_map:
-            docs_in_old = list(final_map[old_label]["documents"])
-            final_map[new_label] = {"label": new_label, "documents": docs_in_old}
-            del final_map[old_label]
-            print(f"  🔄 Rename: '{old_label}' → '{new_label}'")
-
-    # 3. Gán doc mới vào clusters (dùng label đã rename)
-    doc_map = {d.id: d for d in analyzed_docs}
-    for doc_id, cluster_label in assignments.items():
-        doc = doc_map.get(doc_id)
-        if doc and cluster_label in final_map:
-            final_map[cluster_label]["documents"].append({
-                "id": doc.id, "fileName": doc.file_name,
-                "keyphrases": doc.keyphrases, "summary": doc.summary
-            })
-
-    # 4. Thêm clusters mới cho unassigned docs
-    for nc in new_clusters:
-        label = nc.label
-        if label in final_map:
-            label = f"{label} (Mới)"
-        final_map[label] = {"label": label, "documents": [
-            {"id": d.id, "fileName": d.file_name, "keyphrases": d.keyphrases, "summary": d.summary}
-            for d in nc.documents
-        ]}
-
-    _clusters = list(final_map.values())
-    _all_documents = _all_documents + [
-        {"id": d.id, "fileName": d.file_name, "keyphrases": d.keyphrases, "summary": d.summary}
-        for d in analyzed_docs
+    # Build existing clusters from state
+    existing: List[DocumentCluster] = [
+        DocumentCluster(
+            label=c["label"],
+            documents=[
+                AnalyzedDocument(
+                    id=d["id"], file_name=d["fileName"],
+                    keyphrases=d["keyphrases"], summary=d["summary"],
+                )
+                for d in c.get("documents", [])
+            ],
+        )
+        for c in _clusters
     ]
 
-    print(f"✅ Done! {len(_clusters)} clusters, {len(_all_documents)} docs")
+    unassigned_docs = list(analyzed_docs)
+
+    # ── 2a. Gán vào clusters hiện có (multi-label) ───────────────────────
+    renames: Dict[str, str] = {}
+    if existing:
+        try:
+            assign_result = _gemini.assign_to_existing_clusters_multilabel(analyzed_docs, existing)
+            assignments   = assign_result.get("assignments", {})   # {doc_id: [labels]}
+            renames       = assign_result.get("renames", {})
+            unassigned_docs = assign_result["unassigned"]
+
+            for doc_id, labels in assignments.items():
+                if doc_id in doc_to_labels:
+                    doc_to_labels[doc_id].extend(labels)
+
+            assigned_count = sum(1 for v in doc_to_labels.values() if v)
+            print(f"  → Gán vào existing clusters: {assigned_count}/{n} docs (multi-label)")
+        except Exception as e:
+            print(f"  ⚠️ Assign error: {e}")
+
+    # ── 2b. Tạo clusters mới cho docs không khớp cluster nào ────────────
+    if unassigned_docs:
+        try:
+            new_clusters = _gemini.cluster_unassigned_documents(unassigned_docs)
+            existing_label_set = {c["label"] for c in _clusters}
+
+            for nc in new_clusters:
+                new_label = nc.label
+                # Tránh trùng tên
+                if new_label in existing_label_set:
+                    new_label = f"{new_label} (Mới)"
+                    nc.label = new_label
+                _clusters.append({"label": new_label, "documents": []})
+                existing_label_set.add(new_label)
+
+                for doc in nc.documents:
+                    if doc.id in doc_to_labels:
+                        doc_to_labels[doc.id].append(new_label)
+
+            print(f"  → Tạo {len(new_clusters)} clusters mới cho {len(unassigned_docs)} docs")
+        except Exception as e:
+            print(f"  ⚠️ Cluster new error: {e}")
+
+    # ── 2c. Apply renames ────────────────────────────────────────────────
+    for old_label, new_label in renames.items():
+        for c in _clusters:
+            if c["label"] == old_label:
+                print(f"  🔄 Rename: '{old_label}' → '{new_label}'")
+                c["label"] = new_label
+                # Cập nhật doc_to_labels
+                for doc_id in doc_to_labels:
+                    doc_to_labels[doc_id] = [
+                        new_label if lb == old_label else lb
+                        for lb in doc_to_labels[doc_id]
+                    ]
+                break
+
+    # ── 2d. Thêm docs vào cluster (multi-label) ─────────────────────────
+    doc_map = {d.id: d for d in analyzed_docs}
+    for doc_id, labels in doc_to_labels.items():
+        doc = doc_map.get(doc_id)
+        if not doc:
+            continue
+
+        doc_dict = {
+            "id":         doc.id,
+            "fileName":   doc.file_name,
+            "keyphrases": doc.keyphrases,
+            "summary":    doc.summary,
+        }
+
+        unique_labels = list(dict.fromkeys(labels))  # deduplicate, preserve order
+        if unique_labels:
+            for label in unique_labels:
+                target = next((c for c in _clusters if c["label"] == label), None)
+                if target:
+                    target["documents"].append(doc_dict)
+            print(f"  🏷️  {doc.file_name} → {unique_labels}")
+        else:
+            # Fallback: thêm vào "Linh tinh"
+            misc = next((c for c in _clusters if c["label"] == "Linh tinh"), None)
+            if misc is None:
+                _clusters.append({"label": "Linh tinh", "documents": []})
+                misc = _clusters[-1]
+            misc["documents"].append(doc_dict)
+            print(f"  ↳  {doc.file_name} → Linh tinh (fallback)")
+
+        _all_documents.append(doc_dict)
+
+    print(f"\n{'=' * 60}")
+    print(f"  ✅ Done! {len(_clusters)} clusters, {len(_all_documents)} docs")
+    print(f"{'=' * 60}\n")
     return {"final_clusters": _clusters, "all_documents": _all_documents}

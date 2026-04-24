@@ -5,9 +5,9 @@ Combined Pipeline - Tóm tắt + Trích xuất từ khóa + Phân nhóm chủ đ
 Luồng xử lý:
   1. TextRankFacade.summarize(text)   → List[str]  (câu quan trọng)
   2. KeywordExtractorPipeline(...)    → List[(keyword, score)]
-  3. GeminiService.classify_document() → TopicLabel[] (phân nhóm chủ đề)
+  3. LLMService.classify_document()  → TopicLabel[] (phân nhóm chủ đề)
 
-Bước 3 (Gemini) là TÙY CHỌN — pipeline vẫn hoạt động nếu không có API key.
+Bước 3 (Kilo AI / MiniMax) là TÙY CHỌN — pipeline vẫn hoạt động nếu không có API key.
 """
 
 import os
@@ -38,8 +38,8 @@ from textrank.stopwords.vietnamese import Vietnamese         # noqa: E402
 # ─── Import từ keybert/ ───────────────────────────────────────────────────────
 from keybert.pipeline import KeywordExtractorPipeline       # noqa: E402
 
-# ─── Import Gemini service (phân nhóm chủ đề) ──────────────────────────────────
-from backend.cluster.gemini_service import GeminiService, TopicLabel, ClassifyResult  # noqa: E402
+# ─── Import LLM service (phân nhóm chủ đề — Kilo AI / MiniMax) ────────────────
+from backend.cluster.llm_service import LLMService, TopicLabel, ClassifyResult  # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -87,7 +87,7 @@ class CombinedPipeline:
     Pipeline tổng hợp: tóm tắt → trích xuất từ khóa → phân nhóm chủ đề.
 
     Bước 1–2: local (TextRank + KeyBERT-Vi), luôn hoạt động.
-    Bước 3: Gemini API (phân nhóm), TÙY CHỌN — bật bằng enable_clustering=True.
+    Bước 3: Kilo AI / MiniMax (phân nhóm), TÙY CHỌN — bật bằng enable_clustering=True.
 
     Parameters
     ----------
@@ -95,8 +95,8 @@ class CombinedPipeline:
     ngram_n          : khoảng ngram (low, high)  (default: (1, 3))
     min_freq         : tần suất tối thiểu        (default: 1)
     diversify_result : đa dạng hóa bằng K-means  (default: False)
-    enable_clustering: bật phân nhóm Gemini       (default: False)
-    gemini_api_key   : API key (hoặc dùng .env)
+    enable_clustering: bật phân nhóm LLM          (default: False)
+    gemini_api_key   : API key (hoặc dùng .env KILO_API_KEY)
 
     Example
     -------
@@ -118,12 +118,12 @@ class CombinedPipeline:
         self.min_freq          = min_freq
         self.diversify_result  = diversify_result
         self.enable_clustering = enable_clustering
-        self._gemini_api_key   = gemini_api_key
+        self._gemini_api_key   = gemini_api_key  # reused as kilo_api_key
         self._is_loaded        = False
 
         # ── Clustering state (persist across run_batch) ───────────────────────
         self._labels: List[TopicLabel] = []
-        self._gemini: Optional[GeminiService] = None
+        self._gemini: Optional[LLMService] = None
 
     # ── Lazy loading ──────────────────────────────────────────────────────────
     def load(self) -> "CombinedPipeline":
@@ -170,19 +170,19 @@ class CombinedPipeline:
         )
         print("✅ Tất cả pipeline sẵn sàng!\n")
 
-        # ── [5/5] Gemini Service (optional) ───────────────────────────────────
+        # ── [5/5] LLM Service — Kilo AI / MiniMax (optional) ─────────────────
         if self.enable_clustering:
-            print("⏳ [5/5] Đang khởi tạo Gemini Service (phân nhóm chủ đề)…")
+            print("⏳ [5/5] Đang khởi tạo LLM Service — Kilo AI / MiniMax (phân nhóm chủ đề)…")
             try:
-                self._gemini = GeminiService(api_key=self._gemini_api_key)
+                self._gemini = LLMService(api_key=self._gemini_api_key)
                 self._gemini._ensure_client()
-                print("✅ Gemini Service sẵn sàng!\n")
+                print("✅ LLM Service (Kilo AI) sẵn sàng!\n")
             except Exception as e:
-                print(f"⚠️ Gemini Service không khả dụng: {e}")
+                print(f"⚠️ LLM Service không khả dụng: {e}")
                 print("   → Bước phân nhóm sẽ bị bỏ qua.\n")
                 self._gemini = None
         else:
-            print("ℹ️  Phân nhóm (Gemini) tắt. Bật bằng enable_clustering=True.\n")
+            print("ℹ️  Phân nhóm (Kilo AI) tắt. Bật bằng enable_clustering=True.\n")
 
         self._is_loaded = True
         return self
@@ -240,10 +240,10 @@ class CombinedPipeline:
         keywords = list(raw_keywords)
         print(f"   → {len(keywords)} từ khóa được trích xuất.\n")
 
-        # ── Bước 3: Phân nhóm chủ đề (Gemini, optional) ──────────────────────
+        # ── Bước 3: Phân nhóm chủ đề (Kilo AI / MiniMax, optional) ────────────
         label_ids: List[str] = []
         if self._gemini is not None:
-            print("🔄 Bước 3: Phân nhóm chủ đề (Gemini)…")
+            print("🔄 Bước 3: Phân nhóm chủ đề (Kilo AI)…")
             try:
                 kw_names = [kw for kw, _ in keywords]
                 classify_result = self._gemini.classify_document(
@@ -266,7 +266,8 @@ class CombinedPipeline:
             except Exception as e:
                 print(f"   ⚠️ Phân nhóm thất bại: {e}\n")
         else:
-            print("ℹ️  Bỏ qua bước phân nhóm (Gemini không khả dụng).\n")
+            if self.enable_clustering:
+                print("ℹ️  Bỏ qua bước phân nhóm (Kilo AI không khả dụng).\n")
 
         return CombinedResult(
             original_text=text,
@@ -349,10 +350,10 @@ class CombinedPipeline:
                 title=title,
             ))
 
-        # ── Bước 3: Phân nhóm chủ đề bằng Gemini (1 lần cho TẤT CẢ) ────────
+        # ── Bước 3: Phân nhóm chủ đề bằng Kilo AI (1 lần cho TẤT CẢ) ─────────
         if self._gemini is not None:
             print("\n" + "=" * 60)
-            print("  BƯỚC 3: Phân nhóm chủ đề bằng Gemini (dựa trên từ khóa)")
+            print("  BƯỚC 3: Phân nhóm chủ đề bằng Kilo AI / MiniMax (dựa trên từ khóa)")
             print("=" * 60)
 
             # Chuẩn bị danh sách từ khóa của tất cả tài liệu
@@ -366,7 +367,7 @@ class CombinedPipeline:
                 })
                 print(f"   📄 Tài liệu {i+1}: {len(kw_names)} từ khóa → {', '.join(kw_names[:5])}{'…' if len(kw_names) > 5 else ''}")
 
-            print(f"\n🔄 Đang gửi từ khóa của {len(results)} tài liệu cho Gemini để phân nhóm…")
+            print(f"\n🔄 Đang gửi từ khóa của {len(results)} tài liệu cho Kilo AI để phân nhóm…")
             try:
                 cluster_result = self._gemini.cluster_documents_by_keywords(
                     documents_keywords=documents_keywords,
@@ -392,7 +393,8 @@ class CombinedPipeline:
             except Exception as e:
                 print(f"   ⚠️ Phân nhóm thất bại: {e}\n")
         else:
-            print("\nℹ️  Bỏ qua bước phân nhóm (Gemini không khả dụng).\n")
+            if self.enable_clustering:
+                print("\nℹ️  Bỏ qua bước phân nhóm (Kilo AI không khả dụng).\n")
 
         return results, list(self._labels)
 
