@@ -108,14 +108,7 @@ print(result)
 
 ---
 
-## Sử dụng – Gradio Web App
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Demo nhanh
+## Demo nhanh CLI
 ```bash
 python combined_pipeline.py
 ```
@@ -123,4 +116,19 @@ python combined_pipeline.py
 ## Sử dụng – Gradio Web App
 ```bash
 python app.py
+```
+
+## Sử dụng – Backend
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+## Sử dụng – Frontend
+```bash
+cd frontend
+npm install
+npm run dev
 ```

@@ -20,6 +20,7 @@ import os
 import json
 import time
 import random
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
@@ -94,10 +95,10 @@ class LLMService:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = DEFAULT_MODEL,
+        model: Optional[str] = None,
     ):
         self._api_key = api_key or os.environ.get("KILO_API_KEY", "")
-        self._model_name = model
+        self._model_name = model or os.environ.get("KILO_MODEL", self.DEFAULT_MODEL)
         self._client = None
 
     def _ensure_client(self):
@@ -134,9 +135,17 @@ class LLMService:
                 },
             ],
             temperature=temperature,
-            response_format={"type": "json_object"},
         )
-        return response.choices[0].message.content or "{}"
+        content = response.choices[0].message.content or "{}"
+        
+        # Clean markdown code blocks if the model ignores the instruction
+        content = content.strip()
+        if content.startswith("```"):
+            # Remove the first ```json (or just ```) and the last ```
+            content = re.sub(r"^```(?:json)?\s*\n", "", content)
+            content = re.sub(r"\n```\s*$", "", content)
+            
+        return content
 
     # ─────────────────────────────────────────────────────────────────────────
     # Helper: Tạo AnalyzedDocument từ dữ liệu đã extract sẵn (TextRank + KeyBERT)
