@@ -324,17 +324,21 @@ Respond ONLY with valid JSON in this exact format:
         if not existing_clusters or not new_documents:
             return {"assignments": {}, "renames": {}, "unassigned": list(new_documents)}
 
+        # ── Build context: existing clusters (label + representative keyphrases) ──
         existing_ctx = "\n".join(
-            f'- "{c.label}": [{", ".join(kw for d in c.documents[:3] for kw in d.keyphrases[:3])}]'
+            f'  - "{c.label}": [{", ".join(kw for d in c.documents[:5] for kw in d.keyphrases[:4])}]'
             for c in existing_clusters
         )
+
+        # ── Build context: new documents (chỉ keyphrases, không summary) ──
         new_docs_ctx = "\n".join(
-            f'- ID: "{d.id}", Keyphrases: [{", ".join(d.keyphrases[:6])}]'
+            f'  - ID: "{d.id}", Keyphrases: [{", ".join(d.keyphrases[:8])}]'
             for d in new_documents
         )
 
         prompt = f"""You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
-Your task is to map unlabelled documents (represented by their top Vietnamese keyphrases) into an EXISTING dynamic label space.
+
+TASK: Assign each new document to ONE OR MORE existing labels based on its keyphrases.
 
 EXISTING LABEL SPACE (Clusters):
 {existing_ctx}
@@ -342,12 +346,16 @@ EXISTING LABEL SPACE (Clusters):
 NEW UNLABELLED DOCUMENTS:
 {new_docs_ctx}
 
-INSTRUCTIONS FOR MULTI-LABEL ASSIGNMENT:
-1. Multi-Label Capability: A single document often encompasses multiple semantic facets. You MUST assign MULTIPLE labels to a document if it legitimately spans multiple existing topics.
-2. High-Precision Matching: Only assign a label if the document is CLEARLY and STRONGLY related to it. Do not force an assignment if the fit is poor.
-3. Label Space Optimization: If an existing label is too narrow, you may suggest a broader `newLabel` to improve the overarching taxonomy.
+MULTI-LABEL ASSIGNMENT RULES:
+1. MULTI-LABEL IS MANDATORY: If a document covers N different topics, you MUST assign N corresponding labels.
+   Example: Keyphrases ["trí_tuệ_nhân_tạo", "chẩn_đoán bệnh", "bệnh_viện"] → assign to both "Y tế" AND "Công nghệ".
+2. STRICT ASSIGNMENT THRESHOLD: Assign a label ONLY if the provided keyphrases strongly and explicitly justify it. DO NOT over-assign or hallucinate topics not present in the keyphrases. Keep assignments minimal and accurate.
+3. NO OMISSION: Each document must be assigned at least 1 label if suitable. If NO existing labels fit, return an empty array [].
+4. USE EXISTING LABELS ONLY: Only assign labels from the provided EXISTING LABEL SPACE. Do not invent new labels here.
+5. LABEL RENAME SUGGESTION: If an existing label is too narrow or doesn't perfectly encapsulate the newly added documents, suggest a better, broader label name in the "renames" field.
+   Example: The label "Ung thư" could be renamed to "Y tế" if new documents broaden the scope.
 
-Respond ONLY with valid JSON exactly in this format:
+Respond ONLY with valid JSON, NO explanations:
 {{
   "assignments": [
     {{
@@ -408,43 +416,48 @@ Respond ONLY with valid JSON exactly in this format:
         if len(documents) == 1:
             doc = docs_for_clustering[0]
             prompt = f"""You are an advanced AI system for "Unsupervised Vietnamese Multi-label Text Classification".
-Your task is to perform zero-shot label discovery for a new document based on its keyphrases.
+
+TASK: Discover ALL suitable topic labels for the document below based on its keyphrases.
 
 Keywords: {', '.join(doc['keyphrases'])}
 
 RULES:
-- Discovered label MUST be in Vietnamese (2-4 words).
-- Use a GENERAL, COARSE category (e.g., "Y tế", "Giáo dục", "Kinh tế").
-- Single Coarse Concept: The label MUST represent ONE single broad concept. Do NOT use "A và B" or "A & B" format (e.g., NO "Giáo dục và Công nghệ").
-- Do NOT use the raw keywords directly as the label. Abstract them into a higher-level taxonomic category.
+1. MINIMAL MULTI-LABEL: List the MINIMUM number of topics necessary to cover the core content. Base your decision STRICTLY on the provided keyphrases. Do not generate tangential or sprawling labels.
+   Example: Keyphrases ["trí_tuệ_nhân_tạo", "chẩn_đoán", "bệnh_viện"] → ["Y tế", "Công nghệ"]
+2. Labels MUST be in Vietnamese, concise (2-4 words), and represent a broad parent category (e.g., "Y tế", "Giáo dục", "Kinh tế").
+3. SINGLE CONCEPT PER LABEL: Each label MUST represent ONE single concept. DO NOT use "A và B" or "A & B" formats.
+4. ABSTRACTION: DO NOT use raw keywords directly as labels. Abstract them into higher-level taxonomic categories.
 
-Respond ONLY with valid JSON in this exact format:
-{{ "label": "<vietnamese_label>" }}"""
+Respond ONLY with valid JSON:
+{{ "labels": ["<label_1>", "<label_2>"] }}"""
 
             try:
                 raw = self._call(prompt, temperature=0.3)
                 result = json.loads(raw)
-                label = result.get("label", "Tài liệu đơn lẻ")
+                labels = result.get("labels", []) or [result.get("label", "Tài liệu đơn lẻ")]
             except (json.JSONDecodeError, Exception):
-                label = documents[0].keyphrases[0] if documents[0].keyphrases else "Tài liệu đơn lẻ"
+                labels = [documents[0].keyphrases[0]] if documents[0].keyphrases else ["Tài liệu đơn lẻ"]
 
-            return [DocumentCluster(label=label, documents=documents)]
+            # Tạo 1 cluster cho mỗi label, đều chứa doc này (multi-label)
+            return [DocumentCluster(label=lb, documents=list(documents)) for lb in labels]
 
         prompt = f"""You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
-Your task is to perform unsupervised cluster discovery on a set of unlabelled documents based on their extracted keyphrases.
 
-RULES FOR MULTI-LABEL CLUSTERING:
-1. Orthogonal Taxonomy: Create distinct, high-level Vietnamese labels (2-4 words) that represent broad categories (e.g., "Giáo dục", "Y tế", "Công nghệ", "Môi trường").
-2. Single Coarse Concept: A label MUST represent ONE single broad concept. Do NOT use the format "A và B" or "A & B" (e.g., do NOT generate "Giáo dục và Công nghệ"). If a cluster covers both A and B, choose the most dominant parent category or simply split them into two clusters.
-3. Multi-Labeling: A document MUST be placed into MULTIPLE clusters if its keywords span across different semantic domains.
-4. Abstraction: Do NOT use the raw keywords directly as labels. Synthesize them into broader parent categories.
-5. Redundancy Reduction: Use the minimal number of separate clusters needed to accurately cover all multifaceted topics without overlapping.
-6. NO EXPLANATIONS. Produce valid JSON ONLY.
+TASK: Group the unlabelled documents below into topic clusters. A single document can belong to MULTIPLE clusters.
 
-INPUT DOCUMENTS:
+MULTI-LABEL CLUSTERING RULES:
+1. ORTHOGONAL TAXONOMY: Create distinct, broad Vietnamese labels (2-4 words) that do not overlap.
+   Good examples: "Y tế", "Giáo dục", "Công nghệ", "Môi trường", "Kinh tế", "Xã hội"
+2. MULTI-LABEL MANDATORY: If a document relates to N topics, it MUST appear in N clusters.
+   Example: Keyphrases about "ô nhiễm không khí ảnh hưởng sức khỏe" → assign to both "Môi trường" AND "Y tế" clusters.
+3. SINGLE CONCEPT PER LABEL: DO NOT use "A và B" or "A & B". If a document covers A and B, put it in two separate clusters.
+4. ABSTRACTION: Do not use raw keywords as labels. Synthesize them into broader parent categories.
+5. STRICTLY KEYWORD-BASED & MINIMAL CLUSTERS: Generate the MINIMUM number of clusters needed to cover the core topics. Cluster labels MUST be strictly grounded in the provided keyphrases. Avoid sprawling, tangential, or overly granular clusters.
+
+INPUT DOCUMENTS TO CLUSTER:
 {json.dumps(docs_for_clustering, ensure_ascii=False, indent=2)}
 
-Respond ONLY with valid JSON in this exact format:
+Respond ONLY with valid JSON, NO explanations:
 {{
   "clusters": [
     {{ "label": "<vietnamese_label>", "documents": ["id1", "id2"] }}
