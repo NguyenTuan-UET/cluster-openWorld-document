@@ -7,14 +7,14 @@ interface FileUploadProps {
 }
 
 export default function FileUpload({ onFilesAdded, disabled, compact }: FileUploadProps) {
-  const handleFiles = (files: FileList | null) => {
+  const handleFiles = (files: FileList | null, input: HTMLInputElement) => {
     if (!files || disabled) return;
     const selected = Array.from(files).filter(
       (f) => f.type === 'application/pdf' || f.type === 'text/plain'
     );
     if (selected.length > 0) onFilesAdded(selected);
-    // Reset input to allow re-uploading same file
-    (document.activeElement as HTMLInputElement)?.blur();
+    // Reset value → browser sẽ fire onChange khi chọn lại cùng 1 file
+    input.value = '';
   };
 
   if (compact) {
@@ -32,7 +32,7 @@ export default function FileUpload({ onFilesAdded, disabled, compact }: FileUplo
           type="file"
           accept=".pdf,.txt,application/pdf,text/plain"
           multiple
-          onChange={(e) => handleFiles(e.target.files)}
+          onChange={(e) => handleFiles(e.target.files, e.target)}
           disabled={disabled}
           className="hidden"
         />
@@ -50,11 +50,11 @@ export default function FileUpload({ onFilesAdded, disabled, compact }: FileUplo
     >
       <div className="flex gap-6 mb-4">
         {/* PDF badge */}
-        <div className="flex flex-col items-center gap-1">
+        {/* <div className="flex flex-col items-center gap-1">
           <div className="w-12 h-12 rounded-xl bg-rose-100 flex items-center justify-center">
             <span className="text-rose-600 font-bold text-sm">PDF</span>
           </div>
-        </div>
+        </div> */}
         {/* TXT badge */}
         <div className="flex flex-col items-center gap-1">
           <div className="w-12 h-12 rounded-xl bg-sky-100 flex items-center justify-center">
@@ -76,7 +76,7 @@ export default function FileUpload({ onFilesAdded, disabled, compact }: FileUplo
         type="file"
         accept=".pdf,.txt,application/pdf,text/plain"
         multiple
-        onChange={(e) => handleFiles(e.target.files)}
+        onChange={(e) => handleFiles(e.target.files, e.target)}
         disabled={disabled}
         className="hidden"
       />
