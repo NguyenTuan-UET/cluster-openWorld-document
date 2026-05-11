@@ -1,7 +1,10 @@
 from string import punctuation
 import numpy as np
 import torch
+from operator import itemgetter
+from typing import List, Tuple
 from sklearn.cluster import KMeans
+from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from model.named_entities import get_named_entities
 
 punctuation = [c for c in punctuation if c != "_"]
@@ -162,6 +165,79 @@ def diversify_result_kmeans(ngram_result, ngram_embeddings, top_n=5):
     diversify_result_ls = sorted(vote, key=vote.get, reverse=True)
 
     return diversify_result_ls[:top_n]
+
+
+def mmr(
+    doc_embedding: np.ndarray,
+    word_embeddings: np.ndarray,
+    words: List[str],
+    top_n: int = 5,
+    diversity: float = 0.8,
+) -> List[Tuple[str, float]]:
+    """Calculate Maximal Marginal Relevance (MMR)
+    between candidate keywords and the document.
+
+    MMR considers the similarity of keywords/keyphrases with the
+    document, along with the similarity of already selected
+    keywords and keyphrases. This results in a selection of keywords
+    that maximize their within diversity with respect to the document.
+
+    Arguments:
+        doc_embedding: The document embeddings (shape: [1, dim] or [dim])
+        word_embeddings: The embeddings of candidate keywords/phrases (shape: [n, dim])
+        words: The candidate keywords/keyphrases
+        top_n: The number of keywords/keyphrases to return
+        diversity: How diverse the selected keywords/keyphrases are.
+                   Values between 0 and 1; 0 = not diverse, 1 = most diverse.
+
+    Returns:
+        List[Tuple[str, float]]: Selected keywords/keyphrases with their cosine similarity scores
+    """
+    if len(words) == 0:
+        return []
+
+    # Ensure doc_embedding is 2-D: shape [1, dim]
+    if doc_embedding.ndim == 1:
+        doc_embedding = doc_embedding.reshape(1, -1)
+
+    # Extract similarity within words, and between words and the document
+    word_doc_similarity = sklearn_cosine_similarity(word_embeddings, doc_embedding)  # [n, 1]
+    word_similarity = sklearn_cosine_similarity(word_embeddings)                     # [n, n]
+
+    # Initialise: pick the candidate most similar to the document
+    keywords_idx = [int(np.argmax(word_doc_similarity))]
+    candidates_idx = [i for i in range(len(words)) if i != keywords_idx[0]]
+
+    for _ in range(min(top_n - 1, len(words) - 1)):
+        if not candidates_idx:
+            break
+
+        # Similarity between remaining candidates and the document
+        candidate_similarities = word_doc_similarity[candidates_idx, :]  # [c, 1]
+
+        # Maximum similarity between remaining candidates and already-selected keywords
+        target_similarities = np.max(
+            word_similarity[candidates_idx][:, keywords_idx], axis=1
+        )  # [c]
+
+        # MMR score: balance relevance vs. diversity
+        mmr_scores = (
+            (1 - diversity) * candidate_similarities
+            - diversity * target_similarities.reshape(-1, 1)
+        )  # [c, 1]
+
+        mmr_idx = candidates_idx[int(np.argmax(mmr_scores))]
+
+        keywords_idx.append(mmr_idx)
+        candidates_idx.remove(mmr_idx)
+
+    # Return keywords sorted by descending document similarity
+    keywords = [
+        (words[idx], round(float(word_doc_similarity.reshape(1, -1)[0][idx]), 4))
+        for idx in keywords_idx
+    ]
+    keywords = sorted(keywords, key=itemgetter(1), reverse=True)
+    return keywords
 
 
 def remove_duplicates(ngram_result):

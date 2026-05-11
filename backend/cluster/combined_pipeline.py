@@ -94,8 +94,10 @@ class CombinedPipeline:
     top_n            : số từ khóa trả về        (default: 10)
     ngram_n          : khoảng ngram (low, high)  (default: (1, 3))
     min_freq         : tần suất tối thiểu        (default: 1)
-    diversify_result : đa dạng hóa bằng K-means  (default: False)
-    enable_clustering: bật phân nhóm LLM          (default: False)
+    use_mmr          : dùng MMR để đa dạng hóa từ khóa (default: False)
+    use_kmeans       : dùng K-Means để đa dạng hóa từ khóa (default: False)
+    diversity        : hệ số đa dạng MMR [0.0–1.0]       (default: 0.5)
+    enable_clustering: bật phân nhóm LLM                  (default: False)
     gemini_api_key   : API key (hoặc dùng .env KILO_API_KEY)
 
     Example
@@ -109,14 +111,18 @@ class CombinedPipeline:
         top_n: int = 10,
         ngram_n: Tuple[int, int] = (1, 3),
         min_freq: int = 1,
-        diversify_result: bool = False,
+        use_mmr: bool = False,
+        use_kmeans: bool = False,
+        diversity: float = 0.5,
         enable_clustering: bool = False,
         gemini_api_key: Optional[str] = None,
     ):
         self.top_n             = top_n
         self.ngram_n           = ngram_n
         self.min_freq          = min_freq
-        self.diversify_result  = diversify_result
+        self.use_mmr           = use_mmr
+        self.use_kmeans        = use_kmeans
+        self.diversity         = diversity
         self.enable_clustering = enable_clustering
         self._gemini_api_key   = gemini_api_key  # reused as kilo_api_key
         self._is_loaded        = False
@@ -176,13 +182,13 @@ class CombinedPipeline:
             try:
                 self._gemini = LLMService(api_key=self._gemini_api_key)
                 self._gemini._ensure_client()
-                print("✅ LLM Service (Kilo AI) sẵn sàng!\n")
+                print("✅ LLM Service sẵn sàng!\n")
             except Exception as e:
                 print(f"⚠️ LLM Service không khả dụng: {e}")
                 print("   → Bước phân nhóm sẽ bị bỏ qua.\n")
                 self._gemini = None
         else:
-            print("ℹ️  Phân nhóm (Kilo AI) tắt. Bật bằng enable_clustering=True.\n")
+            print("ℹ️  Phân nhóm (LLM) tắt. Bật bằng enable_clustering=True.\n")
 
         self._is_loaded = True
         return self
@@ -235,7 +241,9 @@ class CombinedPipeline:
             min_freq=self.min_freq,
             ngram_n=self.ngram_n,
             top_n=self.top_n,
-            diversify_result=self.diversify_result,
+            use_mmr=self.use_mmr,
+            use_kmeans=self.use_kmeans,
+            diversity=self.diversity,
         )
         keywords = list(raw_keywords)
         print(f"   → {len(keywords)} từ khóa được trích xuất.\n")
@@ -336,7 +344,9 @@ class CombinedPipeline:
                 min_freq=self.min_freq,
                 ngram_n=self.ngram_n,
                 top_n=self.top_n,
-                diversify_result=self.diversify_result,
+                use_mmr=self.use_mmr,
+                use_kmeans=self.use_kmeans,
+                diversity=self.diversity,
             )
             keywords = list(raw_keywords)
             print(f"   → {len(keywords)} từ khóa được trích xuất.\n")
@@ -415,6 +425,6 @@ if __name__ == "__main__":
     Việt Nam đang đẩy mạnh ứng dụng AI vào các lĩnh vực trọng điểm quốc gia.
     """
 
-    pipeline = CombinedPipeline(top_n=10, ngram_n=(1, 3), min_freq=1, diversify_result=False)
+    pipeline = CombinedPipeline(top_n=10, ngram_n=(1, 3), min_freq=1, use_mmr=False)
     result = pipeline.run(text=sample_text, title="Trí tuệ nhân tạo và tương lai")
     print(result)

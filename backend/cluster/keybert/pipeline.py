@@ -54,7 +54,7 @@ class KeywordExtractorPipeline(Pipeline):
             if possible_forward_kwarg in kwargs:
                 forward_kwargs[possible_forward_kwarg] = kwargs[possible_forward_kwarg]
 
-        for possible_postprocess_kwarg in ["top_n", "diversify_result"]:
+        for possible_postprocess_kwarg in ["top_n", "use_mmr", "use_kmeans", "diversity"]:
             if possible_postprocess_kwarg in kwargs:
                 postprocess_kwargs[possible_postprocess_kwarg] = kwargs[possible_postprocess_kwarg]
 
@@ -84,18 +84,37 @@ class KeywordExtractorPipeline(Pipeline):
 
         return {"ngram_list": ngram_list, "ngram_embeddings": ngram_embeddings, "doc_embedding": doc_embedding}
 
-    def postprocess(self, model_outputs, top_n, diversify_result):
+    def postprocess(self, model_outputs, top_n=5, use_mmr=False, use_kmeans=False, diversity=0.8):
         ngram_list = model_outputs['ngram_list']
         ngram_embeddings = model_outputs['ngram_embeddings']
         doc_embedding = model_outputs['doc_embedding']
 
         ngram_result = self.extract_keywords(doc_embedding, ngram_list, ngram_embeddings)
-        non_diversified = sorted([(ngram, ngram_result[ngram]) for ngram in ngram_result],
-                                 key=lambda x: x[1], reverse=True)[:top_n]
 
-        if diversify_result:
+        if use_mmr:
+            import numpy as np
+            words = list(ngram_result.keys())
+            word_embeddings = np.array(
+                [ngram_embeddings[w].flatten().detach().cpu().numpy() for w in words]
+            )
+            doc_emb_np = doc_embedding.flatten().detach().cpu().numpy().reshape(1, -1)
+            return mmr(
+                doc_embedding=doc_emb_np,
+                word_embeddings=word_embeddings,
+                words=words,
+                top_n=top_n,
+                diversity=diversity,
+            )
+
+        if use_kmeans:
             return diversify_result_kmeans(ngram_result, ngram_embeddings, top_n=top_n)
-        return non_diversified
+
+        # Default: sort by cosine similarity score, no diversification
+        return sorted(
+            [(ngram, ngram_result[ngram]) for ngram in ngram_result],
+            key=lambda x: x[1],
+            reverse=True,
+        )[:top_n]
 
     def generate_ngram_list(self, doc_segmentised, filtered_doc_segmentised, ne_ls, ngram_n, min_freq):
         ngram_low, ngram_high = ngram_n
@@ -144,15 +163,29 @@ if __name__ == "__main__":
         text = ' '.join([ln.strip() for ln in f.readlines()])
 
     inp = {"text": text, "title": None}
-    kws = kw_pipeline(
-        inputs=inp, 
-        min_freq=1, 
-        ngram_n=(1, 3), 
-        top_n=5, 
-        diversify_result=False
+
+    # --- Không dùng MMR (mặc định) ---
+    kws_default = kw_pipeline(
+        inputs=inp,
+        min_freq=1,
+        ngram_n=(1, 3),
+        top_n=5,
+        use_mmr=False,
     )
-    
-    print("\nKeywords:")
-    for kw, score in kws:
+    print("\nKeywords (default – sorted by similarity):")
+    for kw, score in kws_default:
+        print(f"  - {kw}: {score:.4f}")
+
+    # --- Dùng MMR với diversity=0.8 ---
+    kws_mmr = kw_pipeline(
+        inputs=inp,
+        min_freq=1,
+        ngram_n=(1, 3),
+        top_n=5,
+        use_mmr=True,
+        diversity=0.8,   # 0.0 = không đa dạng, 1.0 = đa dạng tối đa
+    )
+    print("\nKeywords (MMR diversity=0.8):")
+    for kw, score in kws_mmr:
         print(f"  - {kw}: {score:.4f}")
     print()

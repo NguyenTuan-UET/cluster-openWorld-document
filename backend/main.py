@@ -40,7 +40,12 @@ async def lifespan(app: FastAPI):
 
     try:
         from backend.cluster.combined_pipeline import CombinedPipeline
-        _pipeline = CombinedPipeline(enable_clustering=False)  # Stage 1+2 only
+        _pipeline = CombinedPipeline(
+            enable_clustering=False,
+            use_mmr=True,       # dùng MMR để đa dạng hóa keyphrase
+            use_kmeans=False,   # không dùng K-Means
+            diversity=0.5,      # hệ số MMR: 0.0=relevance, 1.0=diverse
+        )
         _pipeline.load()
         _pipeline_loaded = True
         print("✅ CombinedPipeline loaded!")
@@ -52,7 +57,7 @@ async def lifespan(app: FastAPI):
         _gemini = LLMService()
         _gemini._ensure_client()
         _gemini_loaded = True
-        print("✅ LLM Service (Kilo AI) loaded!")
+        print("✅ LLM Service loaded!")
     except Exception as e:
         print(f"⚠️ LLM Service error: {e}")
 
@@ -138,7 +143,10 @@ def process_and_cluster(req: ExtractRequest):
 
     for i, text in enumerate(req.texts):
         file_name = req.file_names[i] if req.file_names and i < len(req.file_names) else f"doc-{i}"
-        pipeline_result = _pipeline.run(text=text, title=file_name)
+        # Bỏ extension (.txt, .pdf, …) trước khi dùng làm title,
+        # tránh các token như "txt", "pdf" lọt vào danh sách keyphrase.
+        title_for_pipeline = os.path.splitext(file_name)[0] or None
+        pipeline_result = _pipeline.run(text=text, title=title_for_pipeline)
         doc = AnalyzedDocument(
             id=f"doc-{uuid.uuid4().hex[:8]}",
             file_name=file_name,
@@ -146,8 +154,8 @@ def process_and_cluster(req: ExtractRequest):
             summary=pipeline_result.summary_text,
         )
         analyzed_docs.append(doc)
-        kw_preview = ", ".join(doc.keyphrases[:5]) + ("…" if len(doc.keyphrases) > 5 else "")
-        print(f"  [{i+1}/{n}] {file_name}: {len(doc.keyphrases)} từ khóa → {kw_preview}")
+        kw_lines = "\n".join(f"      {j+1:2d}. {kw}" for j, kw in enumerate(doc.keyphrases))
+        print(f"  [{i+1}/{n}] {file_name}: {len(doc.keyphrases)} từ khóa\n{kw_lines}")
 
     # ═══════════════════════════════════════════════════════════════════════
     # PHASE 2: LLM — Multi-label clustering
