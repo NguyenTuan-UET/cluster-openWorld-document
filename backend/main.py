@@ -41,10 +41,9 @@ async def lifespan(app: FastAPI):
     try:
         from backend.cluster.combined_pipeline import CombinedPipeline
         _pipeline = CombinedPipeline(
-            enable_clustering=False,
-            use_mmr=True,       # dùng MMR để đa dạng hóa keyphrase
-            use_kmeans=False,   # không dùng K-Means
-            diversity=0.5,      # hệ số MMR: 0.0=relevance, 1.0=diverse
+            use_mmr=True,
+            use_kmeans=False,
+            diversity=0.5,
         )
         _pipeline.load()
         _pipeline_loaded = True
@@ -138,15 +137,18 @@ def process_and_cluster(req: ExtractRequest):
     # ═══════════════════════════════════════════════════════════════════════
     # PHASE 1: TextRank + KeyBERT cho TẤT CẢ (local, không LLM)
     # ═══════════════════════════════════════════════════════════════════════
-    print(f"\n📊 Phase 1/2 — Trích xuất từ khóa (TextRank + KeyBERT)…")
     analyzed_docs: List[AnalyzedDocument] = []
 
     for i, text in enumerate(req.texts):
         file_name = req.file_names[i] if req.file_names and i < len(req.file_names) else f"doc-{i}"
-        # Bỏ extension (.txt, .pdf, …) trước khi dùng làm title,
-        # tránh các token như "txt", "pdf" lọt vào danh sách keyphrase.
         title_for_pipeline = os.path.splitext(file_name)[0] or None
+
+        print(f"\n{'─' * 50}")
+        print(f"  [{i+1}/{n}] {file_name}")
+        print(f"{'─' * 50}")
+
         pipeline_result = _pipeline.run(text=text, title=title_for_pipeline)
+
         doc = AnalyzedDocument(
             id=f"doc-{uuid.uuid4().hex[:8]}",
             file_name=file_name,
@@ -154,8 +156,9 @@ def process_and_cluster(req: ExtractRequest):
             summary=pipeline_result.summary_text,
         )
         analyzed_docs.append(doc)
+
         kw_lines = "\n".join(f"      {j+1:2d}. {kw}" for j, kw in enumerate(doc.keyphrases))
-        print(f"  [{i+1}/{n}] {file_name}: {len(doc.keyphrases)} từ khóa\n{kw_lines}")
+        print(kw_lines)
 
     # ═══════════════════════════════════════════════════════════════════════
     # PHASE 2: LLM — Multi-label clustering

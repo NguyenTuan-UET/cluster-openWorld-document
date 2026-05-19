@@ -4,20 +4,40 @@ Tóm tắt (TextRank) + Từ khóa (KeyBERT-Vi) + Phân nhóm chủ đề (Kilo 
 ========================================================================
 Chạy:
     source venv/bin/activate
-    python app.py
+    python base_line/app.py
 """
 
 import sys
+import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).parent.parent
+
 # Ensure project root is in sys.path so 'backend' module is importable
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from dotenv import load_dotenv
+load_dotenv(PROJECT_ROOT / ".env")
 
 import gradio as gr
 from backend.cluster.combined_pipeline import CombinedPipeline, CombinedResult
 from backend.cluster.llm_service import LLMService, AnalyzedDocument, DocumentCluster
+import uuid
 import time
-from typing import List, Optional
+from typing import List, Dict
+import re
+import math
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity as _cos_sim
+from pyvi.ViTokenizer import tokenize as pyvi_tokenize
+from sentence_transformers import SentenceTransformer
+
+# ──────────────────────────────────────────────────────────────────────────────
+# In-memory state (giống backend/main.py)
+# ──────────────────────────────────────────────────────────────────────────────
+_all_documents: List[dict] = []
+_clusters: List[dict] = []
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Khởi tạo pipeline (load model 1 lần khi server khởi động)
@@ -25,21 +45,34 @@ from typing import List, Optional
 
 if gr.NO_RELOAD:
     print("=" * 60)
-    print("  Combined Pipeline - Đang khởi động server…")
+    print("  NLP Pipeline — Đang khởi động server…")
     print("=" * 60)
-    _pipeline = CombinedPipeline(enable_clustering=True)
-    _pipeline.load()
 
-    # ── LLM Service (Kilo AI / MiniMax) — theo y hệt docucluster-ai ──
-    _gemini = LLMService()
+    try:
+        _pipeline = CombinedPipeline(use_mmr=True, use_kmeans=False, diversity=0.5)
+        _pipeline.load()
+        print("✅ CombinedPipeline loaded!")
+    except Exception as e:
+        print(f"⚠️ CombinedPipeline error: {e}")
+        _pipeline = None
 
-    # ── In-memory state (y hệt React state trong docucluster-ai App.tsx) ──
-    _all_documents: List[AnalyzedDocument] = []   # tất cả docs đã analyzed
-    _clusters: List[DocumentCluster] = []           # clusters hiện có (label + documents)
+    try:
+        _sym_model = SentenceTransformer(str(PROJECT_ROOT / "pretrained-models/symmetric_emb"))
+        print("✅ symmetric_emb sẵn sàng!")
+    except Exception as e:
+        print(f"⚠️ symmetric_emb error: {e}")
+        _sym_model = None
+
+    try:
+        _llm_service = LLMService()
+        _llm_service._ensure_client()
+        print("✅ LLM Service loaded!")
+    except Exception as e:
+        print(f"⚠️ LLM Service error: {e}")
+        _llm_service = None
 
     print("=" * 60)
     print("  ✅ Server sẵn sàng!")
-    print(f"  📦 Clusters: 0 | Documents: 0")
     print("=" * 60)
 
 
@@ -47,171 +80,317 @@ if gr.NO_RELOAD:
 # Tab 1: Xử lý đơn tài liệu
 # ──────────────────────────────────────────────────────────────────────────────
 
-def process_single(
-    title: str,
-    text: str,
-    max_sentences: int,
-    top_n: int,
-    ngram_low: int,
-    ngram_high: int,
-    min_freq: int,
-    diversify: bool,
-) -> tuple:
-    if not text.strip():
-        return "⚠️ Vui lòng nhập văn bản.", "", ""
-
+def process_single(title, text, max_sentences, top_n, ngram_low, ngram_high, min_freq, diversify):
     _pipeline.top_n            = int(top_n)
     _pipeline.ngram_n          = (int(ngram_low), int(ngram_high))
     _pipeline.min_freq         = int(min_freq)
     _pipeline.diversify_result = diversify
 
-    title_val    = title.strip() if title.strip() else None
-    max_sent_val = int(max_sentences) if max_sentences and int(max_sentences) > 0 else None
+    result = _pipeline.run(text=text, title=title.strip() or None, max_sentences=int(max_sentences) or None)
 
-    result = _pipeline.run(text=text, title=title_val, max_sentences=max_sent_val)
-
-    # ── Stats ─────────────────────────────────────────────────────────────────
-    n_input = len([s for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()])
-    n_summ  = len(result.summary_sentences)
-    n_kw    = len(result.keywords)
-    ratio   = round(n_summ / n_input * 100) if n_input > 0 else 0
-    label_names = []
-    for lid in result.label_ids:
-        for lb in _pipeline.labels:
-            if lb.id == lid:
-                label_names.append(lb.name)
-    label_info = ", ".join(label_names) if label_names else "—"
+    n_input  = len([s for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()])
+    n_summ   = len(result.summary_sentences)
     stats_md = (
-        f"📄 **{n_input}** câu đầu vào &nbsp;→&nbsp; "
-        f"📝 **{n_summ}** câu tóm tắt ({ratio}%) &nbsp;|&nbsp; "
-        f"🔑 **{n_kw}** từ khóa &nbsp;|&nbsp; "
-        f"��️ Nhãn: **{label_info}**"
+        f"📄 **{n_input}** câu → 📝 **{n_summ}** câu tóm tắt ({round(n_summ / n_input * 100)}%) "
+        f"| 🔑 **{len(result.keywords)}** từ khóa"
     )
 
-    # ── Summary ───────────────────────────────────────────────────────────────
-    summary_lines = [f"[{i}]  {sent}" for i, sent in enumerate(result.summary_sentences, 1)]
-    summary_output = "\n\n".join(summary_lines) or "(Không có câu nào được chọn)"
-
-    # ── Keywords ──────────────────────────────────────────────────────────────
-    kw_lines = []
-    for i, (kw, score) in enumerate(result.keywords, 1):
-        bar_len = int(score * 20)
-        bar     = "█" * bar_len + "░" * (20 - bar_len)
-        kw_lines.append(f"{i:>2}. {kw:<30}  {bar}  {score:.4f}")
-    keywords_output = "\n".join(kw_lines) or "(Không trích xuất được từ khóa)"
-
+    summary_output  = "\n\n".join(f"[{i}]  {s}" for i, s in enumerate(result.summary_sentences, 1))
+    keywords_output = "\n".join(
+        f"{i:>2}. {kw:<30}  {'█' * int(sc * 20)}{'░' * (20 - int(sc * 20))}  {sc:.4f}"
+        for i, (kw, sc) in enumerate(result.keywords, 1)
+    )
     return summary_output, keywords_output, stats_md
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Tab 2: Phân nhóm nhiều tài liệu (Batch Clustering)
+# Tab 2: Phân nhóm nhiều tài liệu — giống hệt backend/main.py
 # ──────────────────────────────────────────────────────────────────────────────
 
-def process_batch(
-    docs_text: str,
-    max_sentences: int,
-    top_n: int,
-    ngram_low: int,
-    ngram_high: int,
-    min_freq: int,
-    diversify: bool,
-) -> tuple:
-    """
-    Mỗi tài liệu cách nhau bởi 1 dòng bắt đầu bằng '==='.
-    Dòng đầu tiên sau === là tiêu đề, phần còn lại là nội dung.
-    """
-    if not docs_text.strip():
-        return "⚠️ Vui lòng nhập tài liệu.", "", ""
+def reset_batch():
+    """Xóa toàn bộ state clusters + documents."""
+    global _all_documents, _clusters
+    _all_documents = []
+    _clusters = []
+    return "", "_State đã được reset._", "🗑️ Đã xóa toàn bộ clusters và documents."
 
-    # ── Parse documents ───────────────────────────────────────────────────────
-    texts: List[str] = []
-    titles: List[Optional[str]] = []
 
-    blocks = docs_text.split("===")
-    for block in blocks:
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.split("\n", 1)
-        title = lines[0].strip() if lines else None
-        body  = lines[1].strip() if len(lines) > 1 else lines[0].strip()
-        if not body:
-            continue
-        titles.append(title)
-        texts.append(body)
+def process_batch(docs_text, max_sentences, top_n, ngram_low, ngram_high, min_freq, diversify):
+    global _all_documents, _clusters
 
-    if not texts:
-        return "⚠️ Không tìm thấy tài liệu. Dùng '===' để ngăn cách.", "", ""
+    if _pipeline is None:
+        return "", "⚠️ Pipeline chưa load.", ""
+    if _llm_service is None:
+        return "", "⚠️ LLM Service chưa load. Kiểm tra KILO_API_KEY.", ""
 
-    # ── Update pipeline params ────────────────────────────────────────────────
-    _pipeline.top_n            = int(top_n)
-    _pipeline.ngram_n          = (int(ngram_low), int(ngram_high))
-    _pipeline.min_freq         = int(min_freq)
-    _pipeline.diversify_result = diversify
-    _pipeline.reset_labels()
+    blocks = [b.strip() for b in docs_text.split("===") if b.strip()]
+    titles = [b.partition("\n")[0].strip() for b in blocks]
+    texts  = [b.partition("\n")[2].strip() for b in blocks]
+    n = len(texts)
 
-    max_sent_val = int(max_sentences) if max_sentences and int(max_sentences) > 0 else None
+    _pipeline.top_n   = int(top_n)
+    _pipeline.ngram_n = (int(ngram_low), int(ngram_high))
+    _pipeline.min_freq = int(min_freq)
+    _pipeline.use_mmr  = diversify
 
-    results, labels = _pipeline.run_batch(
-        texts=texts, titles=titles, max_sentences=max_sent_val
-    )
+    print(f"\n{'=' * 60}")
+    print(f"  Batch processing — {n} tài liệu")
+    print(f"{'=' * 60}")
 
-    # ── Format: Kết quả từng tài liệu ────────────────────────────────────────
-    detail_lines = []
-    for i, r in enumerate(results, 1):
-        doc_title = r.title or "(không tiêu đề)"
-        label_names = []
-        for lid in r.label_ids:
-            for lb in labels:
-                if lb.id == lid:
-                    label_names.append(lb.name)
-        label_str = ", ".join(label_names) if label_names else "—"
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 1: TextRank + KeyBERT cho từng doc (không dùng LLM)
+    # ═══════════════════════════════════════════════════════════════
+    analyzed_docs: List[AnalyzedDocument] = []
+    detail_lines: List[str] = []
 
-        kw_str = ", ".join(kw for kw, _ in r.keywords[:8])
+    for i, (text, title) in enumerate(zip(texts, titles)):
+        file_name = title or f"doc-{i}"
+        print(f"\n{'─' * 50}")
+        print(f"  [{i+1}/{n}] {file_name}")
+        print(f"{'─' * 50}")
+
+        pipeline_result = _pipeline.run(
+            text=text,
+            title=title or None,
+            max_sentences=int(max_sentences) or None,
+        )
+
+        doc = AnalyzedDocument(
+            id=f"doc-{uuid.uuid4().hex[:8]}",
+            file_name=f"[{i+1}]",
+            keyphrases=[kw for kw, _ in pipeline_result.keywords],
+            summary=pipeline_result.summary_text,
+        )
+        analyzed_docs.append(doc)
+
+        kw_lines = "\n".join(f"      {j+1:2d}. {kw}" for j, kw in enumerate(doc.keyphrases))
+        print(kw_lines)
+
         detail_lines.append(
             f"{'─' * 50}\n"
-            f"📄 Tài liệu {i}: {doc_title}\n"
-            f"   📝 Tóm tắt: {r.summary_text[:150]}…\n"
-            f"   🔑 Từ khóa (dùng để phân nhóm): {kw_str}\n"
-            f"   🏷️ Nhãn: {label_str}"
+            f"📄 [{i+1}/{n}] {file_name}\n"
+            f"   📝 Tóm tắt: {pipeline_result.summary_text[:150]}…\n"
+            f"   🔑 Từ khóa: {', '.join(doc.keyphrases[:8])}"
         )
-    docs_output = "\n\n".join(detail_lines)
 
-    # ── Format: Cluster overview ──────────────────────────────────────────────
-    if labels:
-        cluster_lines = []
-        for lb in sorted(labels, key=lambda x: x.document_count, reverse=True):
-            doc_indices = [
-                str(i + 1)
-                for i, r in enumerate(results)
-                if lb.id in r.label_ids
-            ]
-            docs_in = ", ".join(doc_indices) if doc_indices else "—"
+    # ═══════════════════════════════════════════════════════════════
+    # PHASE 2: LLM — Multi-label clustering
+    # ═══════════════════════════════════════════════════════════════
+    print(f"\n🤖 Phase 2/2 — LLM phân nhóm multi-label…")
 
-            # Hiển thị từ khóa đại diện cho cluster (gom từ khóa các tài liệu thuộc nhóm)
-            cluster_keywords = set()
-            for i, r in enumerate(results):
-                if lb.id in r.label_ids:
-                    cluster_keywords.update(kw for kw, _ in r.keywords[:5])
-            kw_display = ", ".join(list(cluster_keywords)[:10]) if cluster_keywords else "—"
+    doc_to_labels: Dict[str, List[str]] = {d.id: [] for d in analyzed_docs}
 
-            cluster_lines.append(
-                f"🏷️ **{lb.name}** (ID: {lb.id})\n"
-                f"   Mô tả: {lb.description}\n"
-                f"   📄 Tài liệu: [{docs_in}] ({lb.document_count} docs)\n"
-                f"   🔑 Từ khóa đại diện: {kw_display}"
-            )
-        cluster_output = "\n\n".join(cluster_lines)
-    else:
-        cluster_output = "(Không có nhãn — Kilo AI không khả dụng hoặc chưa bật clustering)"
+    existing: List[DocumentCluster] = [
+        DocumentCluster(
+            label=c["label"],
+            documents=[
+                AnalyzedDocument(
+                    id=d["id"], file_name=d["fileName"],
+                    keyphrases=d["keyphrases"], summary=d["summary"],
+                )
+                for d in c.get("documents", [])
+            ],
+        )
+        for c in _clusters
+    ]
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
-    stats_md = (
-        f"📊 **{len(texts)}** tài liệu &nbsp;→&nbsp; "
-        f"🏷️ **{len(labels)}** nhãn chủ đề"
+    unassigned_docs = list(analyzed_docs)
+    renames: Dict[str, str] = {}
+
+    # ── 2a. Gán vào clusters hiện có (multi-label) ──
+    if existing:
+        try:
+            assign_result   = _llm_service.assign_to_existing_clusters_multilabel(analyzed_docs, existing)
+            assignments     = assign_result.get("assignments", {})
+            renames         = assign_result.get("renames", {})
+            unassigned_docs = assign_result["unassigned"]
+
+            for doc_id, labels in assignments.items():
+                if doc_id in doc_to_labels:
+                    doc_to_labels[doc_id].extend(labels)
+
+            assigned_count = sum(1 for v in doc_to_labels.values() if v)
+            print(f"  → Gán vào existing clusters: {assigned_count}/{n} docs (multi-label)")
+        except Exception as e:
+            print(f"  ⚠️ Assign error: {e}")
+
+    # ── 2b. Tạo clusters mới cho docs chưa gán ──
+    if unassigned_docs:
+        try:
+            new_clusters = _llm_service.cluster_unassigned_documents(unassigned_docs)
+            existing_label_set = {c["label"] for c in _clusters}
+
+            for nc in new_clusters:
+                new_label = nc.label
+                if new_label in existing_label_set:
+                    new_label = f"{new_label} (Mới)"
+                    nc.label = new_label
+                _clusters.append({"label": new_label, "documents": []})
+                existing_label_set.add(new_label)
+
+                for doc in nc.documents:
+                    if doc.id in doc_to_labels:
+                        doc_to_labels[doc.id].append(new_label)
+
+            print(f"  → Tạo {len(new_clusters)} clusters mới cho {len(unassigned_docs)} docs")
+        except Exception as e:
+            print(f"  ⚠️ Cluster new error: {e}")
+
+    # ── 2c. Apply renames ──
+    for old_label, new_label in renames.items():
+        for c in _clusters:
+            if c["label"] == old_label:
+                print(f"  🔄 Rename: '{old_label}' → '{new_label}'")
+                c["label"] = new_label
+                for doc_id in doc_to_labels:
+                    doc_to_labels[doc_id] = [
+                        new_label if lb == old_label else lb
+                        for lb in doc_to_labels[doc_id]
+                    ]
+                break
+
+    # ── 2d. Thêm docs vào cluster (multi-label) ──
+    doc_map = {d.id: d for d in analyzed_docs}
+    for doc_id, labels in doc_to_labels.items():
+        doc = doc_map.get(doc_id)
+        if not doc:
+            continue
+        doc_dict = {
+            "id":         doc.id,
+            "fileName":   doc.file_name,   # là "[i]" — số thứ tự
+            "keyphrases": doc.keyphrases,
+            "summary":    doc.summary,
+        }
+        unique_labels = list(dict.fromkeys(labels))
+        if unique_labels:
+            for label in unique_labels:
+                target = next((c for c in _clusters if c["label"] == label), None)
+                if target:
+                    target["documents"].append(doc_dict)
+            print(f"  🏷️  {doc.file_name} → {unique_labels}")
+        else:
+            misc = next((c for c in _clusters if c["label"] == "Linh tinh"), None)
+            if misc is None:
+                _clusters.append({"label": "Linh tinh", "documents": []})
+                misc = _clusters[-1]
+            misc["documents"].append(doc_dict)
+            print(f"  ↳  {doc.file_name} → Linh tinh (fallback)")
+        _all_documents.append(doc_dict)
+
+    print(f"\n{'=' * 60}")
+    print(f"  ✅ Done! {len(_clusters)} clusters, {len(_all_documents)} docs")
+    print(f"{'=' * 60}\n")
+
+    # ── Format clusters thành Markdown ──
+    cluster_parts = []
+    for c in _clusters:
+        doc_refs = " · ".join(d["fileName"] for d in c["documents"])
+        cluster_parts.append(f"### 🏷️ {c['label']}\n{doc_refs}")
+    clusters_md = "\n\n".join(cluster_parts) if cluster_parts else "_Không có nhóm nào được tạo._"
+
+    return (
+        "\n\n".join(detail_lines),
+        clusters_md,
+        f"📊 **{n}** tài liệu | **{len(_clusters)}** nhóm chủ đề | **{len(_all_documents)}** docs tổng cộng",
     )
 
-    return docs_output, cluster_output, stats_md
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tab 3: So sánh phương pháp tóm tắt (baseline methods)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _split_sentences(text: str) -> List[str]:
+    return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+
+def _pagerank(sim: np.ndarray, damping: float = 0.85, iters: int = 100) -> np.ndarray:
+    n = len(sim)
+    row_sums = sim.sum(axis=1, keepdims=True)
+    row_sums[row_sums == 0] = 1
+    scores = np.ones(n) / n
+    for _ in range(iters):
+        scores = (1 - damping) / n + damping * (sim / row_sums).T @ scores
+    return scores
+
+def _top_k(sents: List[str], scores: np.ndarray, k: int) -> List[str]:
+    ranked = sorted(range(len(sents)), key=lambda i: scores[i], reverse=True)[:k]
+    return [sents[i] for i in sorted(ranked)]
+
+def lead_k(text: str, k: int) -> List[str]:
+    return _split_sentences(text)[:k]
+
+def textrank_word_overlap(text: str, k: int) -> List[str]:
+    sents = _split_sentences(text)
+    if len(sents) <= k:
+        return sents
+    words = [set(s.lower().split()) for s in sents]
+    n = len(sents)
+    sim = np.array([
+        [len(words[i] & words[j]) / (np.log(len(words[i]) + 1) + np.log(len(words[j]) + 1))
+         if i != j and words[i] and words[j] else 0
+         for j in range(n)] for i in range(n)
+    ])
+    return _top_k(sents, _pagerank(sim, damping=0.85), k)
+
+def textrank_tfidf(text: str, k: int) -> List[str]:
+    sents = _split_sentences(text)
+    if len(sents) <= k:
+        return sents
+    sim = _cos_sim(TfidfVectorizer().fit_transform(sents)).astype(float)
+    np.fill_diagonal(sim, 0)
+    return _top_k(sents, _pagerank(sim), k)
+
+def _sym_encode(sentences: List[str]) -> np.ndarray:
+    return _sym_model.encode(sentences, normalize_embeddings=True)
+
+def _auto_k(n: int) -> int:
+    """Công thức tự động chọn số câu — giống TextRankFacade.summarize()."""
+    if n <= 5:
+        return min(n, 3)
+    return max(5, math.ceil(n * 0.4))
+
+def textrank_symmetric(text: str) -> List[str]:
+    """
+    TextRank với Symmetric Embedding làm trọng số cạnh đồ thị.
+
+    Luồng:
+      1. Tách câu (regex)
+      2. Tách từ pyvi → encode bằng symmetric_emb (normalize L2)
+      3. Xây đồ thị có hướng: đỉnh = câu, cạnh (i→j) = cosine sim(i, j)
+         (ma trận kề = emb @ emb.T, bỏ đường chéo)
+      4. PageRank (damping=0.85) trên đồ thị → điểm quan trọng từng câu
+      5. Chọn top-k câu (k tự động theo công thức TextRankFacade),
+         trả về theo thứ tự gốc trong văn bản
+    """
+    sents = _split_sentences(text)
+    n     = len(sents)
+    k     = _auto_k(n)
+    if n <= k:
+        return sents
+
+    # Bước 2: tách từ pyvi → encode bằng AutoModel + mean pooling
+    emb = _sym_encode([pyvi_tokenize(s) for s in sents])
+
+    # Bước 3: ma trận kề — cạnh = cosine similarity (đã normalize → dot product)
+    adj = (emb @ emb.T).astype(float)
+    np.fill_diagonal(adj, 0)   # không có self-loop
+
+    # Bước 4: PageRank
+    scores = _pagerank(adj)
+
+    # Bước 5: chọn top-k, giữ thứ tự gốc
+    return _top_k(sents, scores, k)
+
+def process_compare(title, text, k):
+    k          = int(k) or 3
+    fmt        = lambda sents: "\n\n".join(f"[{i}] {s}" for i, s in enumerate(sents, 1))
+    sym_result = textrank_symmetric(text)
+    return (
+        fmt(sym_result),
+        fmt(lead_k(text, k)),
+        fmt(textrank_word_overlap(text, k)),
+        fmt(textrank_tfidf(text, k)),
+        f"📊 Symmetric tự chọn: **{len(sym_result)}** câu &nbsp;|&nbsp; Baseline k = **{k}**",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -373,9 +552,13 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                         lines=18,
                         value=BATCH_EXAMPLE,
                     )
-                    t2_btn = gr.Button(
-                        "▶  Phân nhóm", variant="primary", elem_id="batch-btn",
-                    )
+                    with gr.Row():
+                        t2_btn = gr.Button(
+                            "▶  Phân nhóm", variant="primary", elem_id="batch-btn",
+                        )
+                        t2_reset_btn = gr.Button(
+                            "🗑️  Reset State", variant="secondary",
+                        )
 
                 with gr.Column(scale=1, min_width=220):
                     with gr.Accordion("⚙️ Tham số", open=True):
@@ -416,6 +599,10 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 docs, clusters, stats = process_batch(*args)
                 return docs, clusters, gr.update(value=stats, visible=True)
 
+            def _reset_batch():
+                docs, clusters, stats = reset_batch()
+                return docs, clusters, gr.update(value=stats, visible=True)
+
             t2_btn.click(
                 fn=_run_batch,
                 inputs=[
@@ -425,154 +612,58 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 outputs=[t2_details, t2_clusters, t2_stats],
             )
 
+            t2_reset_btn.click(
+                fn=_reset_batch,
+                inputs=[],
+                outputs=[t2_details, t2_clusters, t2_stats],
+            )
+
         # ══════════════════════════════════════════════════════════════════════
-        # TAB 3: Label Space — Nhập document mới, phân loại tự động
-        #  (y hệt docucluster-ai: 3 bước extract → assign → cluster)
+        # TAB 3: So sánh phương pháp tóm tắt
         # ══════════════════════════════════════════════════════════════════════
-        with gr.TabItem("🏷️ Label Space (Phân loại)"):
+        with gr.TabItem("📊 So sánh tóm tắt"):
 
             gr.Markdown(
                 """
-                ### 🏷️ Phân loại document — theo luồng docucluster-ai
-                **3 bước:** Trích xuất keyphrases → Gán cluster hiện có → Tạo cluster mới
+                ### 📊 So sánh các phương pháp tóm tắt
+                Chạy cùng văn bản qua 4 phương pháp và so sánh kết quả.
                 """
             )
 
             with gr.Row(equal_height=False):
                 with gr.Column(scale=3):
-                    t3_docs = gr.Textbox(
-                        label="📄 Văn bản (ngăn cách bằng ===)",
-                        placeholder="=== Tiêu đề 1\nNội dung…\n\n=== Tiêu đề 2\nNội dung…",
-                        lines=12,
+                    t3_title = gr.Textbox(label="📌 Tiêu đề (tùy chọn)", lines=1)
+                    t3_text  = gr.Textbox(
+                        label="📄 Văn bản đầu vào",
+                        placeholder="Dán văn bản tiếng Việt vào đây…",
+                        lines=14,
                     )
-                    t3_btn = gr.Button(
-                        "▶  Phân tích & Phân loại", variant="primary",
-                    )
-
-                with gr.Column(scale=1, min_width=240):
-                    gr.Markdown("**Luồng xử lý:**")
-                    gr.Markdown(
-                        """
-                        1. **Extract** — Kilo AI trích xuất keyphrases + summary
-                        2. **Assign** — Gán vào clusters hiện có (BE STRICT)
-                        3. **Cluster** — Gom nhóm doc mới thành clusters MỚI
-                        """
+                    t3_btn = gr.Button("▶  So sánh", variant="primary")
+                with gr.Column(scale=1, min_width=220):
+                    t3_k = gr.Slider(
+                        label="Số câu tóm tắt k (Lead-K / Word Overlap / TF-IDF)",
+                        info="Symmetric tự động chọn k theo độ dài văn bản",
+                        value=3, minimum=1, maximum=15, step=1,
                     )
 
+            t3_stats = gr.Markdown("", elem_id="stats-row", visible=False)
             gr.Markdown("---")
 
-            # ── Kết quả: Clusters ──
-            t3_clusters = gr.Markdown(
-                label="🏷️ Clusters",
-                value="*(Nhấn 'Phân tích' để xem)*",
-            )
+            with gr.Row():
+                t3_current = gr.Textbox(label="🔬 TextRank + Symmetric Embedding (pyvi)", lines=10, interactive=False)
+                t3_lead    = gr.Textbox(label="📌 Lead-K", lines=10, interactive=False)
+            with gr.Row():
+                t3_wo    = gr.Textbox(label="📐 TextRank gốc (Word Overlap, d=0.85)", lines=10, interactive=False)
+                t3_tfidf = gr.Textbox(label="📈 TextRank + TF-IDF (Cosine Similarity)", lines=10, interactive=False)
 
-            # ── Kết quả: Chi tiết từng document ──
-            t3_details = gr.Textbox(
-                label="📄 Chi tiết từng document",
-                lines=15,
-                interactive=False,
-            )
-
-            # ── Hàm xử lý chính ──
-            def process_label_space(docs_text: str):
-                global _clusters, _all_documents
-                if not docs_text.strip():
-                    return "⚠️ Vui lòng nhập văn bản.", "*(Chưa có kết quả)*"
-
-                # ── Parse documents ──
-                texts: List[str] = []
-                titles: List[str] = []
-                blocks = docs_text.split("===")
-                for block in blocks:
-                    block = block.strip()
-                    if not block:
-                        continue
-                    lines = block.split("\n", 1)
-                    title = lines[0].strip() if lines else ""
-                    body = lines[1].strip() if len(lines) > 1 else lines[0].strip()
-                    if not body:
-                        continue
-                    titles.append(title)
-                    texts.append(body)
-
-                if not texts:
-                    return "⚠️ Không tìm thấy tài liệu. Dùng '===' để ngăn cách.", "*(Chưa có kết quả)*"
-
-                # ── STAGE 1+2: TextRank + KeyBERT (local, KHÔNG dùng LLM) ──
-                import uuid as _uuid
-                from backend.cluster.llm_service import AnalyzedDocument as _AD
-                analyzed_docs = []
-                for i, (text, title) in enumerate(zip(texts, titles)):
-                    pipeline_result = _pipeline.run(text=text, title=title or None)
-                    doc = _AD(
-                        id=f"doc-{_uuid.uuid4().hex[:8]}",
-                        file_name=title or f"doc-{i}",
-                        keyphrases=[kw for kw, _ in pipeline_result.keywords],
-                        summary=pipeline_result.summary_text,
-                    )
-                    analyzed_docs.append(doc)
-                    print(f"  ✅ [{i+1}/{len(texts)}] {title or '(no title)'}: {len(doc.keyphrases)} keyphrases")
-
-                # ── STAGE 3: LLM chỉ làm clustering (KHÔNG extract) ──
-                result = _gemini.process_and_cluster_new_documents(
-                    texts=texts,
-                    existing_clusters=_clusters,
-                    existing_documents=_all_documents,
-                    file_names=titles,
-                    analyzed_docs=analyzed_docs,   # ⭐ bỏ qua LLM extract
-                )
-
-                # ── Cập nhật global state ──
-                _clusters = result["final_clusters"]
-                _all_documents = result["all_documents"]
-
-                # ── Format clusters output ──
-                cluster_lines = []
-                for c in sorted(_clusters, key=lambda x: len(x.documents), reverse=True):
-                    doc_ids = ", ".join([f"`{d.id}`" for d in c.documents])
-                    keyphrases = ", ".join(set(kw for d in c.documents for kw in d.keyphrases[:3]))
-                    cluster_lines.append(
-                        f"🏷️ **{c.label}** ({len(c.documents)} docs)\n"
-                        f"   📄 {doc_ids}\n"
-                        f"   🔑 {keyphrases}"
-                    )
-                clusters_out = "\n\n".join(cluster_lines) if cluster_lines else "*(Chưa có cluster nào)*"
-
-                # ── Format details output ──
-                detail_lines = []
-                for d in _all_documents:
-                    kw_str = ", ".join(d.keyphrases[:5])
-                    # Tìm cluster chứa doc này
-                    doc_cluster = next((c.label for c in _clusters if d in c.documents), "—")
-                    detail_lines.append(
-                        f"{'─' * 50}\n"
-                        f"📄 [{d.id}] {d.file_name or '(no title)'}\n"
-                        f"   📝 Summary: {d.summary[:100]}{'…' if len(d.summary) > 100 else ''}\n"
-                        f"   🔑 Keyphrases: {kw_str}\n"
-                        f"   🏷️ Cluster: {doc_cluster}"
-                    )
-                details_out = "\n".join(detail_lines) if detail_lines else "*(Chưa có document nào)*"
-
-                stats = f"📊 **{len(_all_documents)}** documents | **{len(_clusters)}** clusters"
-                return clusters_out + "\n\n" + stats, details_out
+            def _run_compare(*args):
+                cur, lead, wo, tfidf, stats = process_compare(*args)
+                return cur, lead, wo, tfidf, gr.update(value=stats, visible=True)
 
             t3_btn.click(
-                fn=process_label_space,
-                inputs=[t3_docs],
-                outputs=[t3_clusters, t3_details],
-            )
-
-            # ── Nút Reset ──
-            def reset_all():
-                global _clusters, _all_documents
-                _clusters = []
-                _all_documents = []
-                return "✅ Đã reset! Clusters: 0, Documents: 0", "*(Đã reset — nhấn 'Phân tích' để bắt đầu)*"
-
-            gr.Button("🗑️ Reset Clusters & Documents", size="sm").click(
-                fn=reset_all,
-                outputs=[t3_clusters, t3_details],
+                fn=_run_compare,
+                inputs=[t3_title, t3_text, t3_k],
+                outputs=[t3_current, t3_lead, t3_wo, t3_tfidf, t3_stats],
             )
 
     # ── Footer ────────────────────────────────────────────────────────────────
