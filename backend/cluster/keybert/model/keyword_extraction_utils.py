@@ -6,6 +6,7 @@ from typing import List, Tuple
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
 from model.named_entities import get_named_entities
+from pyvi.ViTokenizer import tokenize as pyvi_tokenize
 
 punctuation = [c for c in punctuation if c != "_"]
 punctuation += [""", "–", ",", "…", """, "–"]
@@ -126,6 +127,58 @@ def compute_ngram_embeddings(tokenizer, phobert, ngram_list):
 
         ngram_embeddings[ngram] = word_features.pooler_output
     return ngram_embeddings
+
+
+# ── Asymmetric embedding (SentenceTransformer) ──
+
+def get_doc_embeddings_asymm(segmentised_doc, sentence_model, stopwords):
+    """Tính doc embedding dùng SentenceTransformer (asymmetric_emb).
+    Mỗi câu được pyvi-tokenize trước khi encode.
+    Câu đầu tiên (title nếu có) được nhân đôi trọng số.
+    """
+    embeddings = []
+    weights = []
+
+    for i, sentence in enumerate(segmentised_doc):
+        sent_cleaned = ' '.join([w for w in sentence.split() if w not in stopwords])
+        sent_tokenized = pyvi_tokenize(sent_cleaned)
+        emb = sentence_model.encode([sent_tokenized], normalize_embeddings=True)[0]  # shape [dim]
+        embeddings.append(emb)
+        weights.append(2.0 if i == 0 else 1.0)  # title có trọng số x2
+
+    weights = np.array(weights)
+    embeddings = np.array(embeddings)  # [n, dim]
+    # Weighted average
+    doc_emb = np.average(embeddings, axis=0, weights=weights)
+    return doc_emb  # numpy array [dim]
+
+
+def compute_ngram_embeddings_asymm(sentence_model, ngram_list):
+    """Tính ngram embeddings dùng SentenceTransformer (asymmetric_emb).
+    Mỗi ngram được pyvi-tokenize trước khi encode.
+    """
+    ngram_embeddings = {}
+
+    for ngram in ngram_list:
+        ngram_copy = ngram.lower() if ngram.isupper() else ngram
+        ngram_tokenized = pyvi_tokenize(ngram_copy)
+        emb = sentence_model.encode([ngram_tokenized], normalize_embeddings=True)[0]  # [dim]
+        ngram_embeddings[ngram] = emb  # numpy array
+
+    return ngram_embeddings
+
+
+def compute_ngram_similarity_asymm(ngram_list, ngram_embeddings, doc_embedding):
+    """Tính cosine similarity giữa ngram và doc embedding (numpy arrays)."""
+    ngram_similarity_dict = {}
+
+    for ngram in ngram_list:
+        a = ngram_embeddings[ngram]  # numpy [dim]
+        b = doc_embedding            # numpy [dim]
+        similarity_score = cosine_similarity(a, b)
+        ngram_similarity_dict[ngram] = float(similarity_score)
+
+    return ngram_similarity_dict
 
 
 def compute_ngram_similarity(ngram_list, ngram_embeddings, doc_embedding):
