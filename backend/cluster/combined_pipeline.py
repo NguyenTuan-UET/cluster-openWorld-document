@@ -1,13 +1,10 @@
 """
-Combined Pipeline - Tóm tắt + Trích xuất từ khóa + Phân nhóm chủ đề
-=====================================================================
+Combined Pipeline - Tóm tắt + Trích xuất từ khóa
+=================================================
 
 Luồng xử lý:
-  1. TextRankFacade.summarize(text)   → List[str]  (câu quan trọng)
-  2. KeywordExtractorPipeline(...)    → List[(keyword, score)]
-  3. LLMService.classify_document()  → TopicLabel[] (phân nhóm chủ đề)
-
-Bước 3 (Kilo AI / MiniMax) là TÙY CHỌN — pipeline vẫn hoạt động nếu không có API key.
+  1. TextRankEmbedding.summarize(text)  → List[str]  (câu quan trọng)
+  2. KeywordExtractorPipeline(...)      → List[(keyword, score)]
 """
 
 import os
@@ -15,47 +12,39 @@ import sys
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
 
-# ─── Đường dẫn nội bộ (tất cả đều nằm trong backend/) ───────────────────────
-PROJECT_ROOT        = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-BACKEND_DIR         = os.path.join(PROJECT_ROOT, "backend")
-TEXTRANK_DIR        = os.path.join(BACKEND_DIR, "cluster", "textrank")
-KEYBERT_DIR         = os.path.join(BACKEND_DIR, "cluster", "keybert")
-PRETRAINED_DIR      = os.path.join(PROJECT_ROOT, "pretrained-models")
-VNCORENLP_DIR       = os.path.join(PRETRAINED_DIR, "vncorenlp")
-PHOBERT_PT          = os.path.join(PRETRAINED_DIR, "phobert.pt")
-NER_PT              = os.path.join(PRETRAINED_DIR, "ner-vietnamese-electra-base.pt")
+# ─── Đường dẫn nội bộ ────────────────────────────────────────────────────────
+PROJECT_ROOT      = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+BACKEND_DIR       = os.path.join(PROJECT_ROOT, "backend")
+TEXTRANK_DIR      = os.path.join(BACKEND_DIR, "cluster", "textrank")
+KEYBERT_DIR       = os.path.join(BACKEND_DIR, "cluster", "keybert")
+PRETRAINED_DIR    = os.path.join(PROJECT_ROOT, "pretrained-models")
+VNCORENLP_DIR     = os.path.join(PRETRAINED_DIR, "vncorenlp")
+NER_PT            = os.path.join(PRETRAINED_DIR, "ner-vietnamese-electra-base.pt")
+SYMMETRIC_EMB_DIR = os.path.join(PRETRAINED_DIR, "symmetric_emb")
+ASYMM_EMB_DIR     = os.path.join(PRETRAINED_DIR, "asymmetric_emb")
 
-# ─── Thêm sys.path để import được textrank/ và keybert/ ──────────────────────
+# ─── Thêm sys.path ────────────────────────────────────────────────────────────
 CLUSTER_DIR = os.path.join(BACKEND_DIR, "cluster")
 for p in [TEXTRANK_DIR, CLUSTER_DIR, KEYBERT_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-# ─── Import từ textrank/ ──────────────────────────────────────────────────────
-from textrank.textrank_facade import TextRankFacade          # noqa: E402
-from textrank.stopwords.vietnamese import Vietnamese         # noqa: E402
-
-# ─── Import từ keybert/ ───────────────────────────────────────────────────────
-from keybert.pipeline import KeywordExtractorPipeline       # noqa: E402
-
-# ─── Import LLM service (phân nhóm chủ đề — Kilo AI / MiniMax) ────────────────
-from backend.cluster.llm_service import LLMService, TopicLabel, ClassifyResult  # noqa: E402
+from textrank.textrank_embedding import TextRankEmbedding  # noqa: E402
+from keybert.pipeline import KeywordExtractorPipeline      # noqa: E402
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Dataclass kết quả trả về
+# Dataclass kết quả
 # ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class CombinedResult:
-    """Kết quả tổng hợp của toàn bộ pipeline cho 1 tài liệu."""
+    """Kết quả pipeline cho 1 tài liệu: tóm tắt + từ khóa."""
 
     original_text:     str
     summary_sentences: List[str]              = field(default_factory=list)
     summary_text:      str                    = ""
     keywords:          List[Tuple[str,float]] = field(default_factory=list)
-    # ── Clustering (Bước 3 — Gemini, optional) ────────────────────────────────
-    label_ids:         List[str]              = field(default_factory=list)
     title:             Optional[str]          = None
 
     def __str__(self) -> str:
@@ -64,16 +53,13 @@ class CombinedResult:
             f"  {i+1:2d}. {kw:<30s}  (score: {sc:.4f})"
             for i, (kw, sc) in enumerate(self.keywords)
         )
-        label_str = ", ".join(self.label_ids) if self.label_ids else "(chưa phân nhóm)"
         return (
             f"\n{sep}\n"
             f"VĂN BẢN GỐC:\n{self.original_text.strip()}\n\n"
             f"{sep}\n"
             f"TÓM TẮT ({len(self.summary_sentences)} câu):\n{self.summary_text}\n\n"
             f"{sep}\n"
-            f"TỪ KHÓA ({len(self.keywords)} keywords):\n{kw_str}\n\n"
-            f"{sep}\n"
-            f"NHÃN CHỦ ĐỀ: {label_str}\n"
+            f"TỪ KHÓA ({len(self.keywords)} keywords):\n{kw_str}\n"
             f"{sep}\n"
         )
 
@@ -84,26 +70,16 @@ class CombinedResult:
 
 class CombinedPipeline:
     """
-    Pipeline tổng hợp: tóm tắt → trích xuất từ khóa → phân nhóm chủ đề.
-
-    Bước 1–2: local (TextRank + KeyBERT-Vi), luôn hoạt động.
-    Bước 3: Kilo AI / MiniMax (phân nhóm), TÙY CHỌN — bật bằng enable_clustering=True.
+    Pipeline: tóm tắt (TextRank + Symmetric Embedding) → trích xuất từ khóa (KeyBERT-Vi).
 
     Parameters
     ----------
-    top_n            : số từ khóa trả về        (default: 10)
-    ngram_n          : khoảng ngram (low, high)  (default: (1, 3))
-    min_freq         : tần suất tối thiểu        (default: 1)
-    use_mmr          : dùng MMR để đa dạng hóa từ khóa (default: False)
-    use_kmeans       : dùng K-Means để đa dạng hóa từ khóa (default: False)
-    diversity        : hệ số đa dạng MMR [0.0–1.0]       (default: 0.5)
-    enable_clustering: bật phân nhóm LLM                  (default: False)
-    gemini_api_key   : API key (hoặc dùng .env KILO_API_KEY)
-
-    Example
-    -------
-    >>> p = CombinedPipeline(enable_clustering=True)
-    >>> results, labels = p.run_batch(texts, titles)
+    top_n      : số từ khóa trả về       (default: 10)
+    ngram_n    : khoảng ngram (low, high) (default: (1, 3))
+    min_freq   : tần suất tối thiểu      (default: 1)
+    use_mmr    : dùng MMR                (default: False)
+    use_kmeans : dùng K-Means            (default: False)
+    diversity  : hệ số MMR [0.0–1.0]    (default: 0.5)
     """
 
     def __init__(
@@ -114,303 +90,130 @@ class CombinedPipeline:
         use_mmr: bool = False,
         use_kmeans: bool = False,
         diversity: float = 0.5,
-        enable_clustering: bool = False,
-        gemini_api_key: Optional[str] = None,
     ):
-        self.top_n             = top_n
-        self.ngram_n           = ngram_n
-        self.min_freq          = min_freq
-        self.use_mmr           = use_mmr
-        self.use_kmeans        = use_kmeans
-        self.diversity         = diversity
-        self.enable_clustering = enable_clustering
-        self._gemini_api_key   = gemini_api_key  # reused as kilo_api_key
-        self._is_loaded        = False
+        self.top_n       = top_n
+        self.ngram_n     = ngram_n
+        self.min_freq    = min_freq
+        self.use_mmr     = use_mmr
+        self.use_kmeans  = use_kmeans
+        self.diversity   = diversity
+        self._is_loaded  = False
 
-        # ── Clustering state (persist across run_batch) ───────────────────────
-        self._labels: List[TopicLabel] = []
-        self._gemini: Optional[LLMService] = None
-
-    # ── Lazy loading ──────────────────────────────────────────────────────────
     def load(self) -> "CombinedPipeline":
-        """
-        Load tất cả model vào bộ nhớ.
-        Gọi tường minh hoặc sẽ tự động chạy ở lần run() đầu tiên.
-        """
+        """Load tất cả model vào bộ nhớ."""
         if self._is_loaded:
             return self
 
         import torch
+        from types import SimpleNamespace
 
-        # ── [1/4] VnCoreNLP (dùng chung 1 instance) ──────────────────────────
-        print("⏳ [1/4] Đang tải VnCoreNLP (wseg + pos)…")
+        def _patch_transformers_compat(model):
+            """Patch model cũ (pickle) để tương thích transformers mới."""
+            for module in model.modules():
+                if (hasattr(module, "self") and hasattr(module, "output")
+                        and not hasattr(module, "is_cross_attention")):
+                    module.is_cross_attention = False
+                if hasattr(module, "attention_head_size") and hasattr(module, "query"):
+                    if not hasattr(module, "config"):
+                        module.config = SimpleNamespace(_attn_implementation="eager")
+                    if not hasattr(module, "scaling"):
+                        module.scaling = module.attention_head_size ** -0.5
+                    if not hasattr(module, "is_causal"):
+                        module.is_causal = False
+                    if not hasattr(module, "layer_idx"):
+                        module.layer_idx = None
+
+        print("⏳ [1/3] Đang tải VnCoreNLP…")
         import py_vncorenlp
         self._vncorenlp = py_vncorenlp.VnCoreNLP(
-            annotators=["wseg", "pos"],
-            save_dir=VNCORENLP_DIR,
+            annotators=["wseg", "pos"], save_dir=VNCORENLP_DIR,
         )
         print("✅ VnCoreNLP sẵn sàng!\n")
 
-        # ── [2/4] PhoBERT từ file .pt local ──────────────────────────────────
-        print(f"⏳ [2/4] Đang tải PhoBERT từ {PHOBERT_PT} …")
-        phobert = torch.load(PHOBERT_PT, map_location="cpu", weights_only=False)
-        phobert.eval()
-        print("✅ PhoBERT sẵn sàng!\n")
-
-        # ── [3/4] NER model từ file .pt local ────────────────────────────────
-        print(f"⏳ [3/4] Đang tải NER model từ {NER_PT} …")
+        print(f"⏳ [2/3] Đang tải NER model…")
         ner_model = torch.load(NER_PT, map_location="cpu", weights_only=False)
         ner_model.eval()
+        _patch_transformers_compat(ner_model)
         print("✅ NER model sẵn sàng!\n")
 
-        # ── [4/4] Khởi tạo TextRank + KeyBERT pipeline ───────────────────────
-        print("⏳ [4/4] Đang khởi tạo TextRank + KeyBERT pipeline…")
-        stopwords = Vietnamese()
-        self._summarizer = TextRankFacade(self._vncorenlp, stopwords)
+        print(f"⏳ [3/5] Đang tải Symmetric Embedding…")
+        from sentence_transformers import SentenceTransformer
+        sym_model = SentenceTransformer(SYMMETRIC_EMB_DIR)
+        self._summarizer = TextRankEmbedding(sym_model)
+        print("✅ Symmetric Embedding sẵn sàng!\n")
 
-        # Truyền vncorenlp_instance → tái sử dụng, không load lại
+        print(f"⏳ [4/5] Đang tải Asymmetric Embedding…")
+        # Asymmetric model path truyền từ ngoài vào
         self._kw_pipeline = KeywordExtractorPipeline(
-            model=phobert,
             ner_model=ner_model,
             vncorenlp_instance=self._vncorenlp,
+            asymm_model_path=ASYMM_EMB_DIR,
         )
         print("✅ Tất cả pipeline sẵn sàng!\n")
-
-        # ── [5/5] LLM Service — Kilo AI / MiniMax (optional) ─────────────────
-        if self.enable_clustering:
-            print("⏳ [5/5] Đang khởi tạo LLM Service — Kilo AI / MiniMax (phân nhóm chủ đề)…")
-            try:
-                self._gemini = LLMService(api_key=self._gemini_api_key)
-                self._gemini._ensure_client()
-                print("✅ LLM Service sẵn sàng!\n")
-            except Exception as e:
-                print(f"⚠️ LLM Service không khả dụng: {e}")
-                print("   → Bước phân nhóm sẽ bị bỏ qua.\n")
-                self._gemini = None
-        else:
-            print("ℹ️  Phân nhóm (LLM) tắt. Bật bằng enable_clustering=True.\n")
 
         self._is_loaded = True
         return self
 
-    @property
-    def labels(self) -> List[TopicLabel]:
-        """Danh sách nhãn chủ đề hiện tại."""
-        return list(self._labels)
-
-    def reset_labels(self) -> None:
-        """Xóa toàn bộ nhãn chủ đề (reset clustering)."""
-        self._labels.clear()
-
-    # ── Core method ───────────────────────────────────────────────────────────
     def run(
         self,
         text: str,
         title: Optional[str] = None,
         max_sentences: Optional[int] = None,
     ) -> CombinedResult:
-        """
-        Chạy toàn bộ pipeline: tóm tắt → trích xuất từ khóa → phân nhóm.
-
-        Parameters
-        ----------
-        text          : văn bản tiếng Việt đầu vào
-        title         : tiêu đề (optional)
-        max_sentences : số câu tóm tắt tối đa; None = tự động
-
-        Returns
-        -------
-        CombinedResult  (summary_sentences, summary_text, keywords, label_ids)
-        """
+        """Tóm tắt + trích xuất từ khóa cho 1 tài liệu."""
         if not self._is_loaded:
             self.load()
 
-        # ── Bước 1: Tóm tắt ──────────────────────────────────────────────────
-        print("🔄 Bước 1: Tóm tắt văn bản…")
-        summary_sentences: List[str] = self._summarizer.summarize(
-            text, max_sentences=max_sentences
-        )
-        summary_text: str = " ".join(summary_sentences)
-        print(f"   → {len(summary_sentences)} câu được chọn.\n")
+        summary_sentences = self._summarizer.summarize(text, max_sentences=max_sentences)
+        summary_text = " ".join(summary_sentences)
+        print(f"  📝 Tóm tắt : {len(summary_sentences)} câu")
 
-        # ── Bước 2: Trích xuất từ khóa từ đoạn tóm tắt ───────────────────────
-        print("🔄 Bước 2: Trích xuất từ khóa từ đoạn văn tóm tắt…")
-        inp = {"text": summary_text, "title": title}
-        raw_keywords = self._kw_pipeline(
-            inputs=inp,
+        keywords = list(self._kw_pipeline(
+            inputs={"text": summary_text, "title": title},
             min_freq=self.min_freq,
             ngram_n=self.ngram_n,
             top_n=self.top_n,
             use_mmr=self.use_mmr,
             use_kmeans=self.use_kmeans,
             diversity=self.diversity,
-        )
-        keywords = list(raw_keywords)
-        print(f"   → {len(keywords)} từ khóa được trích xuất.\n")
-
-        # ── Bước 3: Phân nhóm chủ đề (Kilo AI / MiniMax, optional) ────────────
-        label_ids: List[str] = []
-        if self._gemini is not None:
-            print("🔄 Bước 3: Phân nhóm chủ đề (Kilo AI)…")
-            try:
-                kw_names = [kw for kw, _ in keywords]
-                classify_result = self._gemini.classify_document(
-                    summary_text=summary_text,
-                    keywords=kw_names,
-                    title=title,
-                    existing_labels=self._labels,
-                )
-                # Cập nhật label registry
-                for new_lb in classify_result.new_labels:
-                    self._labels.append(new_lb)
-                # Cập nhật document count
-                for lb_id in classify_result.assigned_label_ids:
-                    for lb in self._labels:
-                        if lb.id == lb_id:
-                            lb.document_count += 1
-                label_ids = classify_result.assigned_label_ids
-                print(f"   → Gán {len(label_ids)} nhãn, "
-                      f"{len(classify_result.new_labels)} nhãn mới được tạo.\n")
-            except Exception as e:
-                print(f"   ⚠️ Phân nhóm thất bại: {e}\n")
-        else:
-            if self.enable_clustering:
-                print("ℹ️  Bỏ qua bước phân nhóm (Kilo AI không khả dụng).\n")
+        ))
+        print(f"  🔑 Từ khóa : {len(keywords)}")
 
         return CombinedResult(
             original_text=text,
             summary_sentences=summary_sentences,
             summary_text=summary_text,
             keywords=keywords,
-            label_ids=label_ids,
             title=title,
         )
 
-    # ── Batch processing cho multi-doc clustering ─────────────────────────────
     def run_batch(
         self,
         texts: List[str],
         titles: Optional[List[Optional[str]]] = None,
         max_sentences: Optional[int] = None,
-    ) -> Tuple[List[CombinedResult], List[TopicLabel]]:
-        """
-        Xử lý nhiều tài liệu → tóm tắt + keyword + phân nhóm.
-
-        Quy trình mới:
-          1. Tóm tắt + trích xuất từ khóa cho TẤT CẢ tài liệu trước.
-          2. Gửi danh sách từ khóa của TẤT CẢ tài liệu cho Gemini để phân nhóm
-             một lần duy nhất (thay vì phân nhóm từng tài liệu riêng lẻ).
-
-        Parameters
-        ----------
-        texts  : danh sách văn bản
-        titles : danh sách tiêu đề (hoặc None)
-
-        Returns
-        -------
-        (results, labels) — results[i] tương ứng texts[i]
-        """
+    ) -> List[CombinedResult]:
+        """Tóm tắt + trích xuất từ khóa cho nhiều tài liệu."""
         if titles is None:
             titles = [None] * len(texts)
+        if not self._is_loaded:
+            self.load()
 
-        results: List[CombinedResult] = []
-
-        # ── Bước 1+2: Tóm tắt + Trích xuất từ khóa cho TẤT CẢ tài liệu ────
-        print("\n" + "=" * 60)
-        print("  BƯỚC 1+2: Tóm tắt + Trích xuất từ khóa cho tất cả tài liệu")
-        print("=" * 60)
-
+        results = []
         for i, (text, title) in enumerate(zip(texts, titles)):
-            print(f"\n{'─' * 60}")
-            print(f"📄 Tài liệu {i+1}/{len(texts)}: {(title or '(không tiêu đề)')[:50]}")
-            print(f"{'─' * 60}")
+            print(f"\n{'─' * 50}")
+            print(f"  [{i+1}/{len(texts)}] {title or '(không tiêu đề)'}")
+            print(f"{'─' * 50}")
+            result = self.run(text=text, title=title, max_sentences=max_sentences)
+            print(f"  📝 Tóm tắt : {len(result.summary_sentences)} câu")
+            print(f"  🔑 Từ khóa : {len(result.keywords)}")
+            results.append(result)
 
-            if not self._is_loaded:
-                self.load()
-
-            # ── Bước 1: Tóm tắt ──────────────────────────────────────────────
-            print("🔄 Bước 1: Tóm tắt văn bản…")
-            summary_sentences: List[str] = self._summarizer.summarize(
-                text, max_sentences=max_sentences
-            )
-            summary_text: str = " ".join(summary_sentences)
-            print(f"   → {len(summary_sentences)} câu được chọn.\n")
-
-            # ── Bước 2: Trích xuất từ khóa ───────────────────────────────────
-            print("🔄 Bước 2: Trích xuất từ khóa…")
-            inp = {"text": summary_text, "title": title}
-            raw_keywords = self._kw_pipeline(
-                inputs=inp,
-                min_freq=self.min_freq,
-                ngram_n=self.ngram_n,
-                top_n=self.top_n,
-                use_mmr=self.use_mmr,
-                use_kmeans=self.use_kmeans,
-                diversity=self.diversity,
-            )
-            keywords = list(raw_keywords)
-            print(f"   → {len(keywords)} từ khóa được trích xuất.\n")
-
-            results.append(CombinedResult(
-                original_text=text,
-                summary_sentences=summary_sentences,
-                summary_text=summary_text,
-                keywords=keywords,
-                label_ids=[],      # sẽ gán ở bước 3
-                title=title,
-            ))
-
-        # ── Bước 3: Phân nhóm chủ đề bằng Kilo AI (1 lần cho TẤT CẢ) ─────────
-        if self._gemini is not None:
-            print("\n" + "=" * 60)
-            print("  BƯỚC 3: Phân nhóm chủ đề bằng Kilo AI / MiniMax (dựa trên từ khóa)")
-            print("=" * 60)
-
-            # Chuẩn bị danh sách từ khóa của tất cả tài liệu
-            documents_keywords = []
-            for i, r in enumerate(results):
-                kw_names = [kw for kw, _ in r.keywords]
-                documents_keywords.append({
-                    "doc_index": i,
-                    "title": r.title,
-                    "keywords": kw_names,
-                })
-                print(f"   📄 Tài liệu {i+1}: {len(kw_names)} từ khóa → {', '.join(kw_names[:5])}{'…' if len(kw_names) > 5 else ''}")
-
-            print(f"\n🔄 Đang gửi từ khóa của {len(results)} tài liệu cho Kilo AI để phân nhóm…")
-            try:
-                cluster_result = self._gemini.cluster_documents_by_keywords(
-                    documents_keywords=documents_keywords,
-                )
-
-                # Cập nhật labels
-                self._labels = cluster_result["labels"]
-
-                # Gán label_ids cho từng document
-                assignments = cluster_result["assignments"]
-                for doc_idx, label_ids in assignments.items():
-                    if 0 <= doc_idx < len(results):
-                        results[doc_idx].label_ids = label_ids
-
-                print(f"\n   ✅ Tạo {len(self._labels)} nhóm chủ đề:")
-                for lb in self._labels:
-                    doc_indices = [
-                        str(i + 1) for i in range(len(results))
-                        if lb.id in results[i].label_ids
-                    ]
-                    print(f"      🏷️ {lb.name} → Tài liệu [{', '.join(doc_indices)}]")
-
-            except Exception as e:
-                print(f"   ⚠️ Phân nhóm thất bại: {e}\n")
-        else:
-            if self.enable_clustering:
-                print("\nℹ️  Bỏ qua bước phân nhóm (Kilo AI không khả dụng).\n")
-
-        return results, list(self._labels)
+        return results
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Demo nhanh khi chạy trực tiếp
+# Demo
 # ──────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -424,7 +227,6 @@ if __name__ == "__main__":
     Các chuyên gia khuyến nghị cần có khung pháp lý rõ ràng để quản lý AI.
     Việt Nam đang đẩy mạnh ứng dụng AI vào các lĩnh vực trọng điểm quốc gia.
     """
-
     pipeline = CombinedPipeline(top_n=10, ngram_n=(1, 3), min_freq=1, use_mmr=False)
-    result = pipeline.run(text=sample_text, title="Trí tuệ nhân tạo và tương lai")
+    result = pipeline.run(text=sample_text, title="Trí tuệ nhân tạo")
     print(result)
