@@ -316,3 +316,138 @@ Respond ONLY with valid JSON, NO explanations:
             clusters.append(DocumentCluster(label="Linh tinh", documents=missed))
 
         return clusters
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # ORCHESTRATION: Phase 2 — Multi-label clustering (dùng chung cho cả
+    # FastAPI và Gradio, tránh duplicate logic)
+    # ─────────────────────────────────────────────────────────────────────────
+    def run_batch_clustering(
+        self,
+        analyzed_docs: List[AnalyzedDocument],
+        clusters_state: List[dict],
+    ) -> Dict[str, Any]:
+        """
+        Phase 2: Multi-label clustering với LLM.
+
+        Args:
+            analyzed_docs  : Danh sách AnalyzedDocument đã có keyphrases (từ TextRank + KeyBERT).
+            clusters_state : State hiện tại — list of dicts {"label": str, "documents": [...]}.
+                             Được cập nhật IN-PLACE và trả về lại.
+
+        Returns:
+            {
+                "clusters":  List[dict]  — clusters_state đã cập nhật,
+                "documents": List[dict]  — các doc vừa được thêm vào (để append vào all_documents),
+            }
+        """
+        n = len(analyzed_docs)
+        doc_to_labels: Dict[str, List[str]] = {d.id: [] for d in analyzed_docs}
+
+        # Build DocumentCluster objects từ state dicts
+        existing: List[DocumentCluster] = [
+            DocumentCluster(
+                label=c["label"],
+                documents=[
+                    AnalyzedDocument(
+                        id=d["id"], file_name=d["fileName"],
+                        keyphrases=d["keyphrases"], summary=d["summary"],
+                    )
+                    for d in c.get("documents", [])
+                ],
+            )
+            for c in clusters_state
+        ]
+
+        unassigned_docs = list(analyzed_docs)
+        renames: Dict[str, str] = {}
+
+        # ── 2a. Gán vào clusters hiện có (multi-label) ──
+        if existing:
+            try:
+                assign_result   = self.assign_to_existing_clusters_multilabel(analyzed_docs, existing)
+                assignments     = assign_result.get("assignments", {})
+                renames         = assign_result.get("renames", {})
+                unassigned_docs = assign_result["unassigned"]
+
+                for doc_id, labels in assignments.items():
+                    if doc_id in doc_to_labels:
+                        doc_to_labels[doc_id].extend(labels)
+
+                assigned_count = sum(1 for v in doc_to_labels.values() if v)
+                print(f"  → Gán vào existing clusters: {assigned_count}/{n} docs (multi-label)")
+            except Exception as e:
+                print(f"  ⚠️ Assign error: {e}")
+
+        # ── 2b. Tạo clusters mới cho docs chưa gán ──
+        if unassigned_docs:
+            try:
+                new_clusters = self.cluster_unassigned_documents(unassigned_docs)
+                existing_label_set = {c["label"] for c in clusters_state}
+
+                for nc in new_clusters:
+                    new_label = nc.label
+                    if new_label in existing_label_set:
+                        new_label = f"{new_label} (Mới)"
+                        nc.label = new_label
+                    clusters_state.append({"label": new_label, "documents": []})
+                    existing_label_set.add(new_label)
+
+                    for doc in nc.documents:
+                        if doc.id in doc_to_labels:
+                            doc_to_labels[doc.id].append(new_label)
+
+                print(f"  → Tạo {len(new_clusters)} clusters mới cho {len(unassigned_docs)} docs")
+            except Exception as e:
+                print(f"  ⚠️ Cluster new error: {e}")
+
+        # ── 2c. Apply renames ──
+        for old_label, new_label in renames.items():
+            for c in clusters_state:
+                if c["label"] == old_label:
+                    print(f"  🔄 Rename: '{old_label}' → '{new_label}'")
+                    c["label"] = new_label
+                    for doc_id in doc_to_labels:
+                        doc_to_labels[doc_id] = [
+                            new_label if lb == old_label else lb
+                            for lb in doc_to_labels[doc_id]
+                        ]
+                    break
+
+        # ── 2d. Thêm docs vào clusters (multi-label) ──
+        doc_map = {d.id: d for d in analyzed_docs}
+        new_docs: List[dict] = []
+
+        for doc_id, labels in doc_to_labels.items():
+            doc = doc_map.get(doc_id)
+            if not doc:
+                continue
+
+            doc_dict = {
+                "id":         doc.id,
+                "fileName":   doc.file_name,
+                "keyphrases": doc.keyphrases,
+                "summary":    doc.summary,
+            }
+
+            unique_labels = list(dict.fromkeys(labels))
+            if unique_labels:
+                for label in unique_labels:
+                    target = next((c for c in clusters_state if c["label"] == label), None)
+                    if target:
+                        target["documents"].append(doc_dict)
+                print(f"  🏷️  {doc.file_name} → {unique_labels}")
+            else:
+                # Fallback: "Linh tinh"
+                misc = next((c for c in clusters_state if c["label"] == "Linh tinh"), None)
+                if misc is None:
+                    clusters_state.append({"label": "Linh tinh", "documents": []})
+                    misc = clusters_state[-1]
+                misc["documents"].append(doc_dict)
+                print(f"  ↳  {doc.file_name} → Linh tinh (fallback)")
+
+            new_docs.append(doc_dict)
+
+        return {
+            "clusters":  clusters_state,
+            "documents": new_docs,
+        }
