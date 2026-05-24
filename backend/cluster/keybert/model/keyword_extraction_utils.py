@@ -140,8 +140,7 @@ def get_doc_embeddings_asymm(segmentised_doc, sentence_model, stopwords):
     weights = []
 
     for i, sentence in enumerate(segmentised_doc):
-        sent_cleaned = ' '.join([w for w in sentence.split() if w not in stopwords])
-        sent_tokenized = pyvi_tokenize(sent_cleaned)
+        sent_tokenized = pyvi_tokenize(sentence)  # encode toàn câu, không lọc stopword
         emb = sentence_model.encode([sent_tokenized], normalize_embeddings=True)[0]  # shape [dim]
         embeddings.append(emb)
         weights.append(2.0 if i == 0 else 1.0)  # title có trọng số x2
