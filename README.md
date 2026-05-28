@@ -1,61 +1,54 @@
 # Combined Pipeline – Tóm tắt & Trích xuất từ khóa tiếng Việt
 
-> **Self-contained** – toàn bộ code, model và venv nằm trong thư mục này,
-> không phụ thuộc vào `text-summarize/` hay `keyword-extraction-viet/`.
-
 ## Luồng xử lý
 
 ```
 Văn bản đầu vào
        │
-       ▼
-[textrank/]  ──  TextRank (VnCoreNLP wseg)
+        ▼
+backend/textrank/  ──  TextRank (Symmetric emb)
        │         → Danh sách câu quan trọng nhất
        ▼
-Join thành đoạn văn tóm tắt
-       │
-       ▼
-[keybert/]  ──  KeyBERT-Vi (PhoBERT + NER-ELECTRA, load từ .pt local)
+backend/keybert/  ──  KeyBERT (Asymmetric emb + POS + NER + MMR)
        │        → Danh sách (keyword, score)
        ▼
      OUTPUT
-  ┌───────────────────────────────────────────┐
-  │  summary_sentences : List[str]            │
-  │  summary_text      : str                  │
-  │  keywords          : List[(str, float)]   │
-  └───────────────────────────────────────────┘
+  ┌─────────────────────┐
+  │  summary_sentences  │
+  │  summary_text       │
+  │  keywords           │
+  └─────────────────────┘
+       │
+       ▼
+[LLM/] ── Multi-Label Clustering
+
 ```
 
-**Ưu điểm:** dùng chung **1 instance VnCoreNLP** (`wseg + pos`) cho cả 2 bước → tiết kiệm RAM.
+## Danh sách các Models trong hệ thống
+
+| Tên File / Thư mục | Nguồn gốc (Hugging Face) | Vai trò | Kích thước |
+| :--- | :--- | :--- | :--- |
+| **`vncorenlp/`** | [py_vncorenlp](https://github.com/vncorenlp/VnCoreNLP) | Tách từ (Word Segmentation) & gán nhãn từ loại (POS Tagging) | ~40 MB |
+| **`ner-vietnamese-electra-base.pt`** | [NlpHUST/ner-vietnamese-electra-base](https://huggingface.co/NlpHUST/ner-vietnamese-electra-base) | Nhận diện thực thể tên riêng (Tên người, Địa điểm, Tổ chức) | ~532 MB |
+| **`ner-tokenizer/`** | [NlpHUST/ner-vietnamese-electra-base](https://huggingface.co/NlpHUST/ner-vietnamese-electra-base) | Bộ tách từ (Tokenizer) đi kèm cho mô hình NER | ~1.4 MB |
+| **`symmetric_emb/`** | [dangvantuan/vietnamese-embedding](https://huggingface.co/dangvantuan/vietnamese-embedding) | Embedding đồng dạng (Symmetric) dùng cho TextRank tóm tắt | ~540 MB |
+| **`asymmetric_emb/`** | [AITeamVN/Vietnamese_Embedding](https://huggingface.co/AITeamVN/Vietnamese_Embedding) | Embedding bất đồng dạng (Asymmetric) dùng cho trích xuất từ khóa | ~2.2 GB |
+
 
 ---
 
-## Cấu trúc thư mục
+```bash
+# 1. Kích hoạt venv (nếu chưa kích hoạt)
+source venv/bin/activate
 
-```
-combined_pipeline/
-├── venv/                              ← virtual env riêng (Python 3.12)
-├── pretrained-models/                 ← Tất cả models 
-│   ├── phobert.pt                     ← PhoBERT full model
-│   ├── ner-vietnamese-electra-base.pt ← NER-ELECTRA full model
-│   └── vncorenlp/                    ← VnCoreNLP JAR + models
-├── textrank/                          ← copy từ text-summarize/
-│   ├── textrank_facade.py
-│   ├── tools/
-│   └── stopwords/
-├── keybert/                           ← copy từ keyword-extraction-viet/
-│   ├── pipeline.py
-│   ├── model/
-│   └── vietnamese-stopwords-dash.txt
-├── combined_pipeline.py               ← Class CombinedPipeline + CombinedResult
-├── app.py                             ← Gradio web interface
-├── requirements.txt
-└── README.md
+# 2. Chạy script tải tự động
+python download_models.py
 ```
 
 ---
 
-## Sử dụng – Python API
+
+## Sử dụng
 
 ```python
 from combined_pipeline import CombinedPipeline
@@ -82,41 +75,15 @@ print(result.summary_sentences)   # List[str]             – các câu tóm t�
 print(result.summary_text)        # str                   – đoạn văn join
 print(result.keywords)            # List[(str, float)]    – keyword + score
 
-# In đẹp toàn bộ
 print(result)
 ```
-
-### Cấu trúc `CombinedResult`
-
-| Thuộc tính          | Kiểu                     | Mô tả                                       |
-|---------------------|--------------------------|---------------------------------------------|
-| `original_text`     | `str`                    | Văn bản gốc truyền vào                      |
-| `summary_sentences` | `List[str]`              | Danh sách câu quan trọng (đúng thứ tự gốc)  |
-| `summary_text`      | `str`                    | Các câu tóm tắt join bằng dấu cách          |
-| `keywords`          | `List[Tuple[str,float]]` | Từ khóa + điểm số, sắp xếp giảm dần         |
-
----
-### Tham số trên giao diện
-
-| Tham số          | Mặc định | Mô tả                                          |
-|------------------|----------|------------------------------------------------|
-| Top N keywords   | 10       | Số lượng từ khóa muốn lấy                      |
-| Ngram low range  | 1        | Độ dài ngram tối thiểu (1 = từ đơn)            |
-| Ngram high range | 3        | Độ dài ngram tối đa (3 = cụm 3 từ)            |
-| Min frequency    | 1        | Tần suất tối thiểu (tăng lên cho văn bản dài)  |
-| Diversify result | False    | Đa dạng hóa bằng K-means clustering            |
-
 ---
 
 ## Demo nhanh CLI
 ```bash
-python combined_pipeline.py
+python -m backend.cluster.combine_pipeline
 ```
 
-## Sử dụng – Gradio Web App
-```bash
-python app.py
-```
 
 ## Sử dụng – Backend
 ```bash
