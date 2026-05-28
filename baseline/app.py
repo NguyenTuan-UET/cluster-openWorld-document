@@ -49,7 +49,7 @@ if gr.NO_RELOAD:
     print("=" * 60)
 
     try:
-        _pipeline = CombinedPipeline(use_mmr=True, use_kmeans=False, diversity=0.5)
+        _pipeline = CombinedPipeline(use_mmr=True, diversity=0.5)
         _pipeline.load()
         print("✅ CombinedPipeline loaded!")
     except Exception as e:
@@ -80,11 +80,11 @@ if gr.NO_RELOAD:
 # Tab 1: Xử lý đơn tài liệu
 # ──────────────────────────────────────────────────────────────────────────────
 
-def process_single(title, text, max_sentences, top_n, ngram_low, ngram_high, min_freq, diversify):
+def process_single(title, text, max_sentences, top_n, ngram_low, ngram_high, min_freq, kw_mode):
     _pipeline.top_n            = int(top_n)
     _pipeline.ngram_n          = (int(ngram_low), int(ngram_high))
     _pipeline.min_freq         = int(min_freq)
-    _pipeline.diversify_result = diversify
+    _pipeline.use_mmr          = (kw_mode == "MMR")
 
     result = _pipeline.run(text=text, title=title.strip() or None, max_sentences=int(max_sentences) or None)
 
@@ -115,7 +115,7 @@ def reset_batch():
     return "", "_State đã được reset._", "🗑️ Đã xóa toàn bộ clusters và documents."
 
 
-def process_batch(docs_text, max_sentences, top_n, ngram_low, ngram_high, min_freq, diversify):
+def process_batch(docs_text, max_sentences, top_n, ngram_low, ngram_high, min_freq, kw_mode):
     global _all_documents, _clusters
 
     if _pipeline is None:
@@ -128,10 +128,10 @@ def process_batch(docs_text, max_sentences, top_n, ngram_low, ngram_high, min_fr
     texts  = [b.partition("\n")[2].strip() for b in blocks]
     n = len(texts)
 
-    _pipeline.top_n   = int(top_n)
-    _pipeline.ngram_n = (int(ngram_low), int(ngram_high))
+    _pipeline.top_n    = int(top_n)
+    _pipeline.ngram_n  = (int(ngram_low), int(ngram_high))
     _pipeline.min_freq = int(min_freq)
-    _pipeline.use_mmr  = diversify
+    _pipeline.use_mmr    = (kw_mode == "MMR")
 
     print(f"\n{'=' * 60}")
     print(f"  Batch processing — {n} tài liệu")
@@ -306,12 +306,12 @@ SINGLE_EXAMPLES = [
     [
         "Thành Cổ Loa - Lịch sử và hiện tại",
         "Nhắc đến Cổ Loa, người ta nghĩ ngay đến truyền thuyết về An Dương Vương được thần Kim Quy bày cho cách xây thành, về chiếc lẫy nỏ thần làm từ móng chân rùa thần và mối tình bi thương Mỵ Châu – Trọng Thủy. Đằng sau những câu chuyện thiên về tâm linh ấy, thế hệ con cháu còn khám phá được những giá trị khảo cổ to lớn của Cổ Loa.\nKhu di tích Cổ Loa cách trung tâm Hà Nội 17km thuộc huyện Đông Anh, Hà Nội, có diện tích bảo tồn gần 500ha được coi là địa chỉ văn hóa đặc biệt của thủ đô và cả nước. Cổ Loa có hàng loạt di chỉ khảo cổ học đã được phát hiện, phản ánh quá trình phát triển liên tục của dân tộc ta từ sơ khai qua các thời kỳ đồ đồng, đồ đá và đồ sắt mà đỉnh cao là văn hóa Đông Sơn, vẫn được coi là nền văn minh sông Hồng thời kỳ tiền sử của dân tộc Việt Nam.\nCổ Loa từng là kinh đô của nhà nước Âu Lạc thời kỳ An Dương Vương (thế kỷ III TCN) và của nước Đại Việt thời Ngô Quyền (thế kỷ X) mà thành Cổ Loa là một di tích minh chứng còn lại cho đến ngày nay.",
-        3, 8, 1, 3, 1, False,
+        3, 8, 1, 3, 1, "Default",
     ],
     [
         "Trí tuệ nhân tạo",
         "Trí tuệ nhân tạo (AI) đang thay đổi mọi khía cạnh của cuộc sống hiện đại. Từ y tế, giáo dục đến giao thông vận tải, AI mang lại những cải tiến vượt bậc. Các thuật toán học máy giúp chẩn đoán bệnh chính xác hơn bác sĩ trong nhiều trường hợp. Xe tự lái ứng dụng deep learning để nhận diện đường đi và tránh va chạm. Chatbot được trang bị xử lý ngôn ngữ tự nhiên hỗ trợ khách hàng 24/7. Tuy nhiên, AI cũng đặt ra nhiều thách thức về đạo đức và quyền riêng tư. Các chuyên gia khuyến nghị cần có khung pháp lý rõ ràng để quản lý AI. Việt Nam đang đẩy mạnh ứng dụng AI vào các lĩnh vực trọng điểm quốc gia.",
-        0, 10, 1, 3, 1, True,
+        0, 10, 1, 3, 1, "MMR",
     ],
 ]
 
@@ -393,8 +393,10 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                         t1_min_freq = gr.Slider(
                             label="Min frequency", value=1, minimum=1, maximum=5, step=1,
                         )
-                        t1_diversify = gr.Checkbox(
-                            label="🎲 Diversify (K-means)", value=False,
+                        t1_kw_mode = gr.Radio(
+                            choices=["Default", "MMR"],
+                            label="🎯 Keyword mode",
+                            value="Default",
                         )
 
             t1_stats = gr.Markdown("", elem_id="stats-row", visible=False)
@@ -416,7 +418,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 examples=SINGLE_EXAMPLES,
                 inputs=[
                     t1_title, t1_text, t1_max_sent, t1_top_n,
-                    t1_ng_lo, t1_ng_hi, t1_min_freq, t1_diversify,
+                    t1_ng_lo, t1_ng_hi, t1_min_freq, t1_kw_mode,
                 ],
                 label="💡 Văn bản mẫu",
             )
@@ -429,7 +431,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 fn=_run_single,
                 inputs=[
                     t1_title, t1_text, t1_max_sent, t1_top_n,
-                    t1_ng_lo, t1_ng_hi, t1_min_freq, t1_diversify,
+                    t1_ng_lo, t1_ng_hi, t1_min_freq, t1_kw_mode,
                 ],
                 outputs=[t1_summary, t1_keywords, t1_stats],
             )
@@ -480,7 +482,11 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                         t2_min_freq = gr.Slider(
                             label="Min frequency", value=1, minimum=1, maximum=5, step=1,
                         )
-                        t2_diversify = gr.Checkbox(label="🎲 Diversify", value=False)
+                        t2_kw_mode = gr.Radio(
+                            choices=["Default", "MMR"],
+                            label="🎯 Keyword mode",
+                            value="Default",
+                        )
 
             t2_stats = gr.Markdown("", elem_id="batch-stats", visible=False)
 
@@ -512,7 +518,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
                 fn=_run_batch,
                 inputs=[
                     t2_docs, t2_max_sent, t2_top_n,
-                    t2_ng_lo, t2_ng_hi, t2_min_freq, t2_diversify,
+                    t2_ng_lo, t2_ng_hi, t2_min_freq, t2_kw_mode,
                 ],
                 outputs=[t2_details, t2_clusters, t2_stats],
             )
@@ -575,7 +581,7 @@ with gr.Blocks(title="Vietnamese NLP Pipeline") as demo:
     gr.Markdown(
         """
         <small>
-        **Gợi ý:** Top N = 8–12 · Ngram (1, 3) · Min freq = 1 (văn bản ngắn), 2–3 (văn bản dài) · Diversify = đa dạng chủ đề<br>
+        **Gợi ý:** Top N = 8–12 · Ngram (1, 3) · Min freq = 1 (văn bản ngắn), 2–3 (văn bản dài) · Mode: Default / MMR (đa dạng)<br>
         **Phân nhóm:** Cần có `KILO_API_KEY` trong file `.env` để bật tính năng clustering.
         </small>
         """
