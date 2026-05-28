@@ -1,13 +1,13 @@
 from underthesea import sent_tokenize
 
-
+# check chuỗi con
 def substring(w, ls):
     for w2 in ls:
         if w != w2 and w in w2:
             return True
     return False
 
-
+# ghép các token liên tiếp thành 1 cụm từ 
 def get_ner_phrases(sent_ner_result):
     ner_list = []
     current_ner = [sent_ner_result[0]["word"]]
@@ -24,11 +24,10 @@ def get_ner_phrases(sent_ner_result):
     ner_list.append((' '.join(current_ner), sent_ner_result[len(sent_ner_result) - 1]['entity']))
     return ner_list
 
-
 def get_named_entities(nlp, doc):
     ner_lists = []
-    for sent in sent_tokenize(doc):
-        sent_ner_result = nlp(sent)
+    for sent in sent_tokenize(doc): # tách câu
+        sent_ner_result = nlp(sent) # nhận dạng thực thể
         if len(sent_ner_result) > 0:
             ner_lists += get_ner_phrases(sent_ner_result)
 
@@ -39,5 +38,5 @@ def get_named_entities(nlp, doc):
         if entity not in ner_list_non_dup and ner_type.startswith('I'):
             ner_list_non_dup.append(entity)
 
-    ner_list_final = [w.replace(" ##", "") for w in ner_list_non_dup if not substring(w, ner_list_non_dup)]
+    ner_list_final = [w for w in ner_list_non_dup if not substring(w, ner_list_non_dup)]
     return ner_list_final

@@ -84,7 +84,7 @@ export default function App() {
       <div className="flex items-center gap-2 px-4 py-1.5 bg-indigo-50 rounded-full border border-indigo-100">
         <Sparkles size={14} className="text-indigo-600" />
         <span className="text-xs font-medium text-indigo-600">
-          TextRank + KeyBERT • Kilo AI Clustering
+          TextRank + KeyBERT + LLM
         </span>
       </div>
 
@@ -106,7 +106,7 @@ export default function App() {
 
       {/* Supported formats */}
       <div className="flex items-center gap-4 text-xs text-slate-400">
-        <span>Định dạng: PDF, TXT</span>
+        <span>Định dạng: TXT</span>
         <span>•</span>
         <span>Nhiều file cùng lúc</span>
       </div>
@@ -140,13 +140,13 @@ export default function App() {
                 ? 'bg-indigo-100 text-indigo-700'
                 : 'bg-slate-100 text-slate-400 line-through'
               }`}>
-              1 — Đọc file
+              1 - Đọc file
             </span>
             <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${!isExtracting
                 ? 'bg-amber-100 text-amber-700'
                 : 'bg-slate-100 text-slate-400'
               }`}>
-              2 — Phân nhóm
+              2 - Phân nhóm
             </span>
           </div>
 
@@ -168,7 +168,7 @@ export default function App() {
               <>
                 <p className="text-sm font-semibold text-slate-700">Đang phân nhóm theo chủ đề…</p>
                 <p className="text-xs text-slate-500">
-                  TextRank + KeyBERT + Kilo AI · Multi-label
+                  TextRank + KeyBERT + LLM
                 </p>
               </>
             )}
@@ -205,7 +205,7 @@ export default function App() {
                 <Upload size={20} className="text-white" />
               </div>
               <div>
-                <h1 className="text-base font-bold text-slate-900 leading-none">TaxonomyAI</h1>
+                <h1 className="text-base font-bold text-slate-900 leading-none">StatLM</h1>
                 <p className="text-[11px] text-slate-500 leading-none mt-0.5">
                   Phân cụm tài liệu thông minh
                 </p>

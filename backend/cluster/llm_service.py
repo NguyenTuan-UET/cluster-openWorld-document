@@ -5,10 +5,6 @@ LLM Service — Phân nhóm tài liệu theo chủ đề
 Luồng 2 bước (sau TextRank + KeyBERT):
   1. assign_to_existing_clusters_multilabel() — Gán document vào clusters hiện có (multi-label)
   2. cluster_unassigned_documents()           — Gom nhóm documents chưa gán thành clusters MỚI
-
-Provider: Kilo AI (MiniMax) — OpenAI-compatible API
-Endpoint: https://api.kilo.ai/api/gateway
-Model: kilo-auto/free
 """
 
 import os
@@ -17,7 +13,7 @@ import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Dict, Any
 
-# ─── Load API key từ .env ────────────────────────────────────────────────────
+# ─── Load API key từ .env ──
 try:
     from dotenv import load_dotenv
     load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
@@ -25,15 +21,9 @@ except ImportError:
     pass
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Data classes
-# ──────────────────────────────────────────────────────────────────────────────
-
+# đầu ra của bước trích xuất từ khóa & tóm tắt
 @dataclass
 class AnalyzedDocument:
-    """
-    Document sau khi trích xuất keyphrases + summary (TextRank + KeyBERT).
-    """
     id: str
     file_name: str = ""
     file_size: int = 0
@@ -41,44 +31,22 @@ class AnalyzedDocument:
     keyphrases: List[str] = field(default_factory=list)
     summary: str = ""
 
-
+# đầu ra của bước phân cụm
 @dataclass
 class DocumentCluster:
-    """
-    Cluster = label + danh sách documents.
-    """
     label: str
     documents: List[AnalyzedDocument] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
-        return {
-            "label": self.label,
-            "documents": [
-                {
-                    "id": d.id,
-                    "fileName": d.file_name,
-                    "keyphrases": d.keyphrases,
-                    "summary": d.summary,
-                }
-                for d in self.documents
-            ],
-        }
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# LLM Client (Kilo AI / MiniMax — OpenAI-compatible API)
-# ──────────────────────────────────────────────────────────────────────────────
+# LLM Client
 
 class LLMService:
     """
-    Wrapper gọi Kilo AI (MiniMax) qua OpenAI SDK.
-
     2 bước chính:
-      1. assign_to_existing_clusters_multilabel() → assignments + unassigned docs
-      2. cluster_unassigned_documents()           → DocumentCluster[]
+      1. assign_to_existing_clusters_multilabel() → thêm vào cluster đã có
+      2. cluster_unassigned_documents()           → nhóm các document chưa có cluster
     """
 
-    KILO_BASE_URL = "https://api.kilo.ai/api/gateway"
+    LLM_URL = "https://api.kilo.ai/api/gateway"
     DEFAULT_MODEL = "kilo-auto/free"
 
     def __init__(
@@ -102,13 +70,11 @@ class LLMService:
         from openai import OpenAI
         self._client = OpenAI(
             api_key=self._api_key,
-            base_url=self.KILO_BASE_URL,
+            base_url=self.LLM_URL,
         )
 
+    # request LLM
     def _call(self, prompt: str, temperature: float = 0.1) -> str:
-        """
-        Gọi chat completions API và trả về nội dung text (JSON).
-        """
         self._ensure_client()
         response = self._client.chat.completions.create(
             model=self._model_name,
@@ -126,224 +92,57 @@ class LLMService:
         )
         content = response.choices[0].message.content or "{}"
 
-        # Clean markdown code blocks if the model ignores the instruction
+        # fallback dọn dẹp markdown
         content = content.strip()
         if content.startswith("```"):
             content = re.sub(r"^```(?:json)?\s*\n", "", content)
             content = re.sub(r"\n```\s*$", "", content)
 
         return content
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEP 1: Gán document vào clusters hiện có (MULTI-LABEL)
-    # ─────────────────────────────────────────────────────────────────────────
-    def assign_to_existing_clusters_multilabel(
-        self,
-        new_documents: List[AnalyzedDocument],
-        existing_clusters: List[DocumentCluster],
-    ) -> Dict[str, Any]:
-        if not existing_clusters or not new_documents:
-            return {"assignments": {}, "renames": {}, "unassigned": list(new_documents)}
-
-        # ── Build context: existing clusters (label + representative keyphrases) ──
-        existing_ctx = "\n".join(
-            f'  - "{c.label}": [{", ".join(kw for d in c.documents[:5] for kw in d.keyphrases[:4])}]'
-            for c in existing_clusters
-        )
-
-        # ── Build context: new documents ──
-        new_docs_ctx = "\n".join(
-            f'  - ID: "{d.id}", Keyphrases: [{", ".join(d.keyphrases[:8])}]'
-            for d in new_documents
-        )
-
-        prompt = f"""You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
-
-TASK: Assign each new document to ONE OR MORE existing labels based on its keyphrases.
-
-EXISTING LABEL SPACE (Clusters):
-{existing_ctx}
-
-NEW UNLABELLED DOCUMENTS:
-{new_docs_ctx}
-
-MULTI-LABEL ASSIGNMENT RULES:
-1. MULTI-LABEL IS MANDATORY: If a document covers N different topics, you MUST assign N corresponding labels.
-   Example: Keyphrases ["trí_tuệ_nhân_tạo", "chẩn_đoán bệnh", "bệnh_viện"] → assign to both "Y tế" AND "Công nghệ".
-2. STRICT ASSIGNMENT THRESHOLD: Assign a label ONLY if the provided keyphrases strongly and explicitly justify it. DO NOT over-assign or hallucinate topics not present in the keyphrases. Keep assignments minimal and accurate.
-3. NO OMISSION: Each document must be assigned at least 1 label if suitable. If NO existing labels fit, return an empty array [].
-4. USE EXISTING LABELS ONLY: Only assign labels from the provided EXISTING LABEL SPACE. Do not invent new labels here.
-5. LABEL RENAME SUGGESTION: If an existing label is too narrow or doesn't perfectly encapsulate the newly added documents, suggest a better, broader label name in the "renames" field.
-   Example: The label "Ung thư" could be renamed to "Y tế" if new documents broaden the scope.
-
-Respond ONLY with valid JSON, NO explanations:
-{{
-  "assignments": [
-    {{
-      "documentId": "<id>",
-      "clusterLabels": ["<label1>", "<label2>"],
-      "renames": {{"<old_label>": "<new_label>"}}
-    }}
-  ]
-}}"""
-
-        try:
-            raw = self._call(prompt)
-            result = json.loads(raw)
-        except Exception:
-            result = {"assignments": []}
-
-        existing_labels = {c.label for c in existing_clusters}
-        assignments: Dict[str, List[str]] = {}
-        renames: Dict[str, str] = {}
-
-        for item in result.get("assignments", []):
-            doc_id         = item.get("documentId", "")
-            cluster_labels = item.get("clusterLabels", [])
-            rename_map     = item.get("renames", {}) or {}
-
-            valid_labels = [lb for lb in cluster_labels if lb in existing_labels]
-            if valid_labels:
-                assignments[doc_id] = valid_labels
-
-            for old_lb, new_lb in rename_map.items():
-                if old_lb in existing_labels and new_lb and new_lb.strip():
-                    renames[old_lb] = new_lb.strip()
-
-        unassigned = [d for d in new_documents if not assignments.get(d.id)]
-
-        return {
-            "assignments": assignments,
-            "renames":     renames,
-            "unassigned":  unassigned,
-        }
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # STEP 2: Tạo clusters MỚI cho documents chưa được gán
-    # ─────────────────────────────────────────────────────────────────────────
-    def cluster_unassigned_documents(
-        self,
-        documents: List[AnalyzedDocument],
-    ) -> List[DocumentCluster]:
-        if not documents:
-            return []
-
-        docs_for_clustering = [
-            {
-                "id": d.id,
-                "fileName": d.file_name,
-                "keyphrases": d.keyphrases[:5],
-            }
-            for d in documents
-        ]
-
-        if len(documents) == 1:
-            doc = docs_for_clustering[0]
-            prompt = f"""You are an advanced AI system for "Unsupervised Vietnamese Multi-label Text Classification".
-
-TASK: Discover ALL suitable topic labels for the document below based on its keyphrases.
-
-Keywords: {', '.join(doc['keyphrases'])}
-
-RULES:
-1. MINIMAL MULTI-LABEL: List the MINIMUM number of topics necessary to cover the core content. Base your decision STRICTLY on the provided keyphrases. Do not generate tangential or sprawling labels.
-   Example: Keyphrases ["trí_tuệ_nhân_tạo", "chẩn_đoán", "bệnh_viện"] → ["Y tế", "Công nghệ"]
-2. Labels MUST be in Vietnamese, concise (2-4 words), and represent a broad parent category (e.g., "Y tế", "Giáo dục", "Kinh tế").
-3. SINGLE CONCEPT PER LABEL: Each label MUST represent ONE single concept. DO NOT use "A và B" or "A & B" formats.
-4. ABSTRACTION: DO NOT use raw keywords directly as labels. Abstract them into higher-level taxonomic categories.
-
-Respond ONLY with valid JSON:
-{{ "labels": ["<label_1>", "<label_2>"] }}"""
-
-            try:
-                raw = self._call(prompt, temperature=0.3)
-                result = json.loads(raw)
-                labels = result.get("labels", []) or [result.get("label", "Tài liệu đơn lẻ")]
-            except (json.JSONDecodeError, Exception):
-                labels = [documents[0].keyphrases[0]] if documents[0].keyphrases else ["Tài liệu đơn lẻ"]
-
-            return [DocumentCluster(label=lb, documents=list(documents)) for lb in labels]
-
-        prompt = f"""You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
-
-TASK: Group the unlabelled documents below into topic clusters. A single document can belong to MULTIPLE clusters.
-
-MULTI-LABEL CLUSTERING RULES:
-1. ORTHOGONAL TAXONOMY: Create distinct, broad Vietnamese labels (2-4 words) that do not overlap.
-   Good examples: "Y tế", "Giáo dục", "Công nghệ", "Môi trường", "Kinh tế", "Xã hội"
-2. MULTI-LABEL MANDATORY: If a document relates to N topics, it MUST appear in N clusters.
-   Example: Keyphrases about "ô nhiễm không khí ảnh hưởng sức khỏe" → assign to both "Môi trường" AND "Y tế" clusters.
-3. SINGLE CONCEPT PER LABEL: DO NOT use "A và B" or "A & B". If a document covers A and B, put it in two separate clusters.
-4. ABSTRACTION: Do not use raw keywords as labels. Synthesize them into broader parent categories.
-5. STRICTLY KEYWORD-BASED & MINIMAL CLUSTERS: Generate the MINIMUM number of clusters needed to cover the core topics. Cluster labels MUST be strictly grounded in the provided keyphrases. Avoid sprawling, tangential, or overly granular clusters.
-
-INPUT DOCUMENTS TO CLUSTER:
-{json.dumps(docs_for_clustering, ensure_ascii=False, indent=2)}
-
-Respond ONLY with valid JSON, NO explanations:
-{{
-  "clusters": [
-    {{ "label": "<vietnamese_label>", "documents": ["id1", "id2"] }}
-  ]
-}}"""
-
-        try:
-            raw = self._call(prompt, temperature=0.1)
-            result = json.loads(raw)
-        except (json.JSONDecodeError, Exception):
-            result = {"clusters": []}
-
-        # ── Hydrate: convert doc IDs → AnalyzedDocument objects ──
-        doc_map = {d.id: d for d in documents}
-        clusters: List[DocumentCluster] = []
-
-        for cluster_data in result.get("clusters", []):
-            cluster_docs = [
-                doc_map[doc_id]
-                for doc_id in cluster_data.get("documents", [])
-                if doc_id in doc_map
-            ]
-            if cluster_docs:
-                clusters.append(DocumentCluster(
-                    label=cluster_data.get("label", "Không xác định"),
-                    documents=cluster_docs,
-                ))
-
-        # ── Missed documents → "Linh tinh" cluster ──
-        clustered_ids = {d.id for c in clusters for d in c.documents}
-        missed = [d for d in documents if d.id not in clustered_ids]
-        if missed:
-            clusters.append(DocumentCluster(label="Linh tinh", documents=missed))
-
-        return clusters
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # ORCHESTRATION: Phase 2 — Multi-label clustering (dùng chung cho cả
-    # FastAPI và Gradio, tránh duplicate logic)
-    # ─────────────────────────────────────────────────────────────────────────
+ 
     def run_batch_clustering(
         self,
         analyzed_docs: List[AnalyzedDocument],
         clusters_state: List[dict],
     ) -> Dict[str, Any]:
         """
-        Phase 2: Multi-label clustering với LLM.
+        analyzed_docs = [
+            AnalyzedDocument1, AnalyzedDocument2,AnalyzedDocument3, AnalyzedDocument4
+        ]
 
-        Args:
-            analyzed_docs  : Danh sách AnalyzedDocument đã có keyphrases (từ TextRank + KeyBERT).
-            clusters_state : State hiện tại — list of dicts {"label": str, "documents": [...]}.
-                             Được cập nhật IN-PLACE và trả về lại.
-
-        Returns:
+        clusters_state = [
             {
-                "clusters":  List[dict]  — clusters_state đã cập nhật,
-                "documents": List[dict]  — các doc vừa được thêm vào (để append vào all_documents),
-            }
+                "label": "Công nghệ",
+                "documents": [AnalyzedDocument1, AnalyzedDocument2]
+            },
+            {
+                "label": "Y tế",
+                "documents": [AnalyzedDocument3, AnalyzedDocument4]
+            },
+        ]
         """
+
+        # khởi tạo nhãn trống cho các doc: { id_1 : [], id_2 : [], ... id_n : []}
         n = len(analyzed_docs)
         doc_to_labels: Dict[str, List[str]] = {d.id: [] for d in analyzed_docs}
 
-        # Build DocumentCluster objects từ state dicts
+        """
+        TRƯỚC (clusters_state - dict TỪ llm):
+        [
+            {
+                "label": "Công nghệ",
+                "documents": [AnalyzedDocument1 , AnalyzedDocument2]
+            }
+        ]
+
+        SAU (existing - objects):
+        [
+            DocumentCluster(
+                label="Công nghệ",
+                documents=[AnalyzedDocument1 , AnalyzedDocument2]
+            )
+        ]
+        """
         existing: List[DocumentCluster] = [
             DocumentCluster(
                 label=c["label"],
@@ -358,6 +157,7 @@ Respond ONLY with valid JSON, NO explanations:
             for c in clusters_state
         ]
 
+        # danh sách các doc chưa được gán vào cluster nào
         unassigned_docs = list(analyzed_docs)
         renames: Dict[str, str] = {}
 
@@ -451,3 +251,257 @@ Respond ONLY with valid JSON, NO explanations:
             "clusters":  clusters_state,
             "documents": new_docs,
         }
+
+
+    """
+    TRƯỚC
+        analyzed_docs: [doc_01, doc_02, doc_03]
+        existing: [DocumentCluster("Công nghệ", [AnalyzedDocument1]), DocumentCluster("Y tế", [AnalyzedDocument2])]
+    
+    SAU
+        {
+            "assignments": {"doc_01": ["Công nghệ", "Y tế"]},
+            "renames": {},
+            "unassigned": ["doc_02", "doc_03"]
+        } 
+    """
+    def assign_to_existing_clusters_multilabel(
+        self,
+        new_documents: List[AnalyzedDocument],
+        existing_clusters: List[DocumentCluster],
+    ) -> Dict[str, Any]:
+        if not existing_clusters or not new_documents:
+            return {"assignments": {}, "renames": {}, "unassigned": list(new_documents)}
+
+        # context: mô tả cluster với kp trong các văn bản
+        existing_ctx = "\n".join(
+            f'  - "{c.label}": [{", ".join(kw for d in c.documents[:5] for kw in d.keyphrases[:4])}]'
+            for c in existing_clusters
+        )
+
+        # context: ID - các kp 
+        new_docs_ctx = "\n".join(
+            f'  - ID: "{d.id}", Keyphrases: [{", ".join(d.keyphrases[:8])}]'
+            for d in new_documents
+        )
+
+        # Prompt gán tài liệu vào cụm hiện có
+        prompt = f"""\
+            You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
+
+            TASK
+            Assign each new document to ONE OR MORE existing labels based on its keyphrases.
+
+            EXISTING LABEL SPACE (Clusters):
+            {existing_ctx}
+
+            NEW UNLABELLED DOCUMENTS:
+            {new_docs_ctx}
+
+            MULTI-LABEL ASSIGNMENT RULES:
+            1. MULTI-LABEL IS MANDATORY
+                If a document covers N different topics, you MUST assign N corresponding labels.
+                Example: Keyphrases ["trí_tuệ_nhân_tạo", "chẩn_đoán bệnh", "bệnh_viện"]
+                            → assign to both "Y tế" AND "Công nghệ".
+
+            2. STRICT ASSIGNMENT THRESHOLD
+                Assign a label ONLY if the keyphrases strongly and explicitly justify it.
+                DO NOT over-assign or hallucinate topics not present in the keyphrases.
+
+            3. NO OMISSION
+                Each document must be assigned at least 1 label if suitable.
+                If NO existing labels fit, return an empty array [].
+
+            4. USE EXISTING LABELS ONLY
+                Only assign labels from the EXISTING LABEL SPACE above.
+                Do not invent new labels here.
+
+            5. LABEL RENAME SUGGESTION
+                If an existing label is too narrow, suggest a broader name in "renames".
+                Example: "Ung thư" → "Y tế" when new documents broaden the scope.
+
+            OUTPUT FORMAT — respond ONLY with valid JSON, no explanations:
+            {{
+            "assignments": [
+                {{
+                "documentId":    "<id>",
+                "clusterLabels": ["<label1>", "<label2>"],
+                "renames":       {{"<old_label>": "<new_label>"}}
+                }}
+            ]
+            }}
+        """
+
+        try:
+            raw = self._call(prompt)
+            result = json.loads(raw)
+        except Exception:
+            result = {"assignments": []}
+
+        existing_labels = {c.label for c in existing_clusters}
+        assignments: Dict[str, List[str]] = {}
+        renames: Dict[str, str] = {}
+
+        # lấy các doc được gắn nhãn / đổi tên
+        for item in result.get("assignments", []):
+            doc_id         = item.get("documentId", "")
+            cluster_labels = item.get("clusterLabels", [])
+            rename_map     = item.get("renames", {}) or {}
+
+            # được phân vào nhãn đã có
+            valid_labels = [lb for lb in cluster_labels if lb in existing_labels]
+            if valid_labels:
+                assignments[doc_id] = valid_labels
+
+            # đổi tên nhãn nếu cần
+            for old_lb, new_lb in rename_map.items():
+                if old_lb in existing_labels and new_lb and new_lb.strip():
+                    renames[old_lb] = new_lb.strip()
+
+        # không được phân vào nhãn nào -> cho vào unassigned
+        unassigned = [d for d in new_documents if not assignments.get(d.id)]
+
+        return {
+            "assignments": assignments,
+            "renames":     renames,
+            "unassigned":  unassigned,
+        }
+
+    """
+    TRƯỚC: [ AnalyzedDocument1, AnalyzedDocument2,AnalyzedDocument3, AnalyzedDocument4 ]
+    SAU:
+    [ 
+        DocumentCluster("Công nghệ", [AnalyzedDocument1, AnalyzedDocument2]), 
+        DocumentCluster("Y tế", [AnalyzedDocument3, AnalyzedDocument4]) 
+    ]   
+    """ 
+    def cluster_unassigned_documents(
+        self,
+        documents: List[AnalyzedDocument],
+    ) -> List[DocumentCluster]:
+        if not documents:
+            return []
+
+        docs_for_clustering = [
+            {
+                "id": d.id,
+                "fileName": d.file_name,
+                "keyphrases": d.keyphrases[:5],
+            }
+            for d in documents
+        ]
+
+        if len(documents) == 1:
+            doc = docs_for_clustering[0]
+            prompt = f"""\
+                You are an advanced AI system for "Unsupervised Vietnamese Multi-label Text Classification".
+
+                TASK
+                Discover ALL suitable topic labels for the single document below.
+
+                KEYWORDS
+                {', '.join(doc['keyphrases'])}
+
+                RULES:
+                1. MINIMAL MULTI-LABEL
+                    List the MINIMUM number of topics that cover the core content.
+                    Base your decision STRICTLY on the provided keyphrases.
+                    Example: ["trí_tuệ_nhân_tạo", "chẩn_đoán", "bệnh_viện"] → ["Y tế", "Công nghệ"]
+
+                2. LABEL FORMAT
+                    Labels MUST be in Vietnamese, concise (2-4 words), broad parent categories.
+                    Good examples: "Y tế", "Giáo dục", "Kinh tế", "Công nghệ".
+
+                3. SINGLE CONCEPT PER LABEL
+                    Each label represents ONE concept.
+                    DO NOT use "A và B" or "A & B" — split into two separate labels instead.
+
+                4. ABSTRACTION
+                    DO NOT use raw keywords as labels.
+                    Abstract them into higher-level taxonomic categories.
+
+                OUTPUT FORMAT — respond ONLY with valid JSON:
+                {{ "labels": ["<label_1>", "<label_2>"] }}
+            """
+
+            try:
+                raw = self._call(prompt, temperature=0.3)
+                result = json.loads(raw)
+                labels = result.get("labels", []) or [result.get("label", "Tài liệu đơn lẻ")]
+            except (json.JSONDecodeError, Exception):
+                labels = [documents[0].keyphrases[0]] if documents[0].keyphrases else ["Tài liệu đơn lẻ"]
+
+            return [DocumentCluster(label=lb, documents=list(documents)) for lb in labels]
+
+        prompt = f"""\
+            You are an advanced AI system specializing in "Unsupervised Vietnamese Multi-label Text Classification".
+
+            TASK
+            Group the unlabelled documents below into topic clusters.
+            A single document can belong to MULTIPLE clusters.
+
+            MULTI-LABEL CLUSTERING RULES:
+            1. ORTHOGONAL TAXONOMY
+                Create distinct, broad Vietnamese labels (2-4 words) that do not overlap.
+                Good examples: "Y tế", "Giáo dục", "Công nghệ", "Môi trường", "Kinh tế", "Xã hội".
+
+            2. MULTI-LABEL MANDATORY
+                If a document relates to N topics, it MUST appear in N clusters.
+                Example: "ô nhiễm không khí ảnh hưởng sức khỏe"
+                            → assign to both "Môi trường" AND "Y tế".
+
+            3. SINGLE CONCEPT PER LABEL
+                DO NOT use "A và B" or "A & B".
+                If a document covers A and B, put it in two separate clusters.
+
+            4. ABSTRACTION
+                Do not use raw keywords as labels.
+                Synthesize them into broader parent categories.
+
+            5. MINIMAL CLUSTERS
+                Generate the MINIMUM number of clusters needed to cover core topics.
+                Labels MUST be strictly grounded in the provided keyphrases.
+                Avoid sprawling, tangential, or overly granular clusters.
+
+            INPUT DOCUMENTS TO CLUSTER:
+            {json.dumps(docs_for_clustering, ensure_ascii=False, indent=2)}
+
+            OUTPUT FORMAT — respond ONLY with valid JSON, no explanations:
+            {{
+            "clusters": [
+                {{ "label": "<vietnamese_label>", "documents": ["id1", "id2"] }}
+            ]
+            }}
+        """
+
+        try:
+            raw = self._call(prompt, temperature=0.1)
+            result = json.loads(raw)
+        except (json.JSONDecodeError, Exception):
+            result = {"clusters": []}
+
+        # map [id : documents]
+        doc_map = {d.id: d for d in documents}
+        clusters: List[DocumentCluster] = []
+
+        for cluster_data in result.get("clusters", []):
+            cluster_docs = [
+                doc_map[doc_id]
+                for doc_id in cluster_data.get("documents", [])
+                if doc_id in doc_map
+            ]
+            if cluster_docs:
+                clusters.append(DocumentCluster(
+                    label=cluster_data.get("label", "Không xác định"),
+                    documents=cluster_docs,
+                ))
+
+        # ── Missed documents → "Linh tinh" cluster ──
+        clustered_ids = {d.id for c in clusters for d in c.documents}
+        missed = [d for d in documents if d.id not in clustered_ids]
+        if missed:
+            clusters.append(DocumentCluster(label="Linh tinh", documents=missed))
+
+        return clusters
+
+    

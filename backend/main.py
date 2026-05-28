@@ -27,8 +27,8 @@ _all_documents: List[dict] = []
 _clusters: List[dict] = []
 _pipeline_loaded = False
 _gemini_loaded = False
-_pipeline = None   # type: ignore
-_gemini = None     # type: ignore
+_pipeline = None
+_gemini = None
 
 
 @asynccontextmanager
@@ -41,8 +41,7 @@ async def lifespan(app: FastAPI):
     try:
         from backend.cluster.combined_pipeline import CombinedPipeline
         _pipeline = CombinedPipeline(
-            use_mmr=True,
-            use_kmeans=False,
+            use_mmr=False,
             diversity=0.5,
         )
         _pipeline.load()
@@ -78,7 +77,7 @@ app.add_middleware(
 )
 
 
-# ── Pydantic schemas ────────────────────────────────────────────────────────
+# data backend
 class ExtractRequest(BaseModel):
     texts: List[str]
     file_names: Optional[List[str]] = None
@@ -109,15 +108,6 @@ def reset_state():
 
 @app.post("/process-and-cluster")
 def process_and_cluster(req: ExtractRequest):
-    """
-    Batch clustering với multi-label:
-
-      Phase 1 (local): TextRank + KeyBERT cho TẤT CẢ tài liệu → keyphrases + summary
-      Phase 2 (LLM):
-        a. Gán mỗi doc vào NHIỀU clusters hiện có (multi-label)
-        b. Docs không khớp cluster nào → tạo clusters mới
-        c. Cập nhật label space và trả về kết quả
-    """
     global _all_documents, _clusters, _pipeline, _gemini
 
     if not req.texts:
@@ -134,9 +124,7 @@ def process_and_cluster(req: ExtractRequest):
     print(f"  Batch processing — {n} tài liệu")
     print(f"{'=' * 60}")
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # PHASE 1: TextRank + KeyBERT cho TẤT CẢ (local, không LLM)
-    # ═══════════════════════════════════════════════════════════════════════
+    # 1. TextRank + KeyBERT cho TẤT CẢ (local, không LLM)
     analyzed_docs: List[AnalyzedDocument] = []
 
     for i, text in enumerate(req.texts):
@@ -160,9 +148,7 @@ def process_and_cluster(req: ExtractRequest):
         kw_lines = "\n".join(f"      {j+1:2d}. {kw}" for j, kw in enumerate(doc.keyphrases))
         print(kw_lines)
 
-    # ═══════════════════════════════════════════════════════════════════════
-    # PHASE 2: LLM — Multi-label clustering
-    # ═══════════════════════════════════════════════════════════════════════
+    # 2. LLM — Multi-label clustering
     print(f"\n🤖 Phase 2/2 — LLM phân nhóm multi-label…")
 
     result = _gemini.run_batch_clustering(analyzed_docs, _clusters)

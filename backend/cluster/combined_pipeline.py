@@ -10,7 +10,12 @@ Luồng xử lý:
 import os
 import sys
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import List, Tuple, Optional
+
+import torch
+import py_vncorenlp
+from sentence_transformers import SentenceTransformer
 
 # ─── Đường dẫn nội bộ ────────────────────────────────────────────────────────
 PROJECT_ROOT      = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -29,13 +34,11 @@ for p in [TEXTRANK_DIR, CLUSTER_DIR, KEYBERT_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from textrank.textrank_embedding import TextRankEmbedding  # noqa: E402
-from keybert.pipeline import KeywordExtractorPipeline      # noqa: E402
+from textrank.textrank_embedding import TextRankEmbedding  
+from keybert.pipeline import KeywordExtractorPipeline     
 
 
-# ──────────────────────────────────────────────────────────────────────────────
 # Dataclass kết quả
-# ──────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class CombinedResult:
@@ -63,23 +66,17 @@ class CombinedResult:
             f"{sep}\n"
         )
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Class chính
-# ──────────────────────────────────────────────────────────────────────────────
-
 class CombinedPipeline:
     """
     Pipeline: tóm tắt (TextRank + Symmetric Embedding) → trích xuất từ khóa (KeyBERT-Vi).
 
     Parameters
     ----------
-    top_n      : số từ khóa trả về       (default: 10)
-    ngram_n    : khoảng ngram (low, high) (default: (1, 3))
-    min_freq   : tần suất tối thiểu      (default: 1)
-    use_mmr    : dùng MMR                (default: False)
-    use_kmeans : dùng K-Means            (default: False)
-    diversity  : hệ số MMR [0.0–1.0]    (default: 0.5)
+    top_n     : số từ khóa trả về       (default: 10)
+    ngram_n   : khoảng ngram (low, high) (default: (1, 3))
+    min_freq  : tần suất tối thiểu      (default: 1)
+    use_mmr   : dùng MMR                (default: False)
+    diversity : hệ số MMR [0.0–1.0]    (default: 0.8)
     """
 
     def __init__(
@@ -88,27 +85,22 @@ class CombinedPipeline:
         ngram_n: Tuple[int, int] = (1, 3),
         min_freq: int = 1,
         use_mmr: bool = False,
-        use_kmeans: bool = False,
-        diversity: float = 0.5,
+        diversity: float = 0.8,
     ):
-        self.top_n       = top_n
-        self.ngram_n     = ngram_n
-        self.min_freq    = min_freq
-        self.use_mmr     = use_mmr
-        self.use_kmeans  = use_kmeans
-        self.diversity   = diversity
-        self._is_loaded  = False
+        self.top_n      = top_n
+        self.ngram_n    = ngram_n
+        self.min_freq   = min_freq
+        self.use_mmr    = use_mmr
+        self.diversity  = diversity
+        self._is_loaded = False
 
     def load(self) -> "CombinedPipeline":
         """Load tất cả model vào bộ nhớ."""
         if self._is_loaded:
             return self
 
-        import torch
-        from types import SimpleNamespace
-
+        #Patch model cũ (pickle) để tương thích transformers mới
         def _patch_transformers_compat(model):
-            """Patch model cũ (pickle) để tương thích transformers mới."""
             for module in model.modules():
                 if (hasattr(module, "self") and hasattr(module, "output")
                         and not hasattr(module, "is_cross_attention")):
@@ -123,27 +115,24 @@ class CombinedPipeline:
                     if not hasattr(module, "layer_idx"):
                         module.layer_idx = None
 
-        print("⏳ [1/3] Đang tải VnCoreNLP…")
-        import py_vncorenlp
+        print("⏳ [1/5] Đang tải VnCoreNLP…")
         self._vncorenlp = py_vncorenlp.VnCoreNLP(
             annotators=["wseg", "pos"], save_dir=VNCORENLP_DIR,
         )
         print("✅ VnCoreNLP sẵn sàng!\n")
 
-        print(f"⏳ [2/3] Đang tải NER model…")
+        print(f"⏳ [2/5] Đang tải NER model…")
         ner_model = torch.load(NER_PT, map_location="cpu", weights_only=False)
         ner_model.eval()
         _patch_transformers_compat(ner_model)
         print("✅ NER model sẵn sàng!\n")
 
         print(f"⏳ [3/5] Đang tải Symmetric Embedding…")
-        from sentence_transformers import SentenceTransformer
         sym_model = SentenceTransformer(SYMMETRIC_EMB_DIR)
         self._summarizer = TextRankEmbedding(sym_model)
         print("✅ Symmetric Embedding sẵn sàng!\n")
 
-        print(f"⏳ [4/5] Đang tải Asymmetric Embedding…")
-        # Asymmetric model path truyền từ ngoài vào
+        print(f"⏳ [4/5] Đang tải Asymmetric Embedding…") 
         self._kw_pipeline = KeywordExtractorPipeline(
             ner_model=ner_model,
             vncorenlp_instance=self._vncorenlp,
@@ -154,13 +143,14 @@ class CombinedPipeline:
         self._is_loaded = True
         return self
 
+    # Tóm tắt + trích xuất từ khóa cho 1 tài liệu
     def run(
         self,
         text: str,
         title: Optional[str] = None,
         max_sentences: Optional[int] = None,
     ) -> CombinedResult:
-        """Tóm tắt + trích xuất từ khóa cho 1 tài liệu."""
+        
         if not self._is_loaded:
             self.load()
 
@@ -174,7 +164,6 @@ class CombinedPipeline:
             ngram_n=self.ngram_n,
             top_n=self.top_n,
             use_mmr=self.use_mmr,
-            use_kmeans=self.use_kmeans,
             diversity=self.diversity,
         ))
         print(f"  🔑 Từ khóa : {len(keywords)}")
@@ -187,13 +176,13 @@ class CombinedPipeline:
             title=title,
         )
 
+    # Tóm tắt + trích xuất từ khóa cho nhiều tài liệu
     def run_batch(
         self,
         texts: List[str],
         titles: Optional[List[Optional[str]]] = None,
         max_sentences: Optional[int] = None,
     ) -> List[CombinedResult]:
-        """Tóm tắt + trích xuất từ khóa cho nhiều tài liệu."""
         if titles is None:
             titles = [None] * len(texts)
         if not self._is_loaded:
@@ -212,10 +201,6 @@ class CombinedPipeline:
         return results
 
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Demo
-# ──────────────────────────────────────────────────────────────────────────────
-
 if __name__ == "__main__":
     sample_text = """
     Trí tuệ nhân tạo (AI) đang thay đổi mọi khía cạnh của cuộc sống hiện đại.
@@ -227,6 +212,6 @@ if __name__ == "__main__":
     Các chuyên gia khuyến nghị cần có khung pháp lý rõ ràng để quản lý AI.
     Việt Nam đang đẩy mạnh ứng dụng AI vào các lĩnh vực trọng điểm quốc gia.
     """
-    pipeline = CombinedPipeline(top_n=10, ngram_n=(1, 3), min_freq=1, use_mmr=False)
+    pipeline = CombinedPipeline(top_n=10, ngram_n=(1, 3), min_freq=1, use_mmr=True)
     result = pipeline.run(text=sample_text, title="Trí tuệ nhân tạo")
     print(result)

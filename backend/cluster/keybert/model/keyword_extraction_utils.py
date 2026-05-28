@@ -1,17 +1,18 @@
 from string import punctuation
 import numpy as np
 import torch
+import re
 from operator import itemgetter
 from typing import List, Tuple
 from sklearn.cluster import KMeans
 from sklearn.metrics.pairwise import cosine_similarity as sklearn_cosine_similarity
-from model.named_entities import get_named_entities
+from .named_entities import get_named_entities
 from pyvi.ViTokenizer import tokenize as pyvi_tokenize
 
 punctuation = [c for c in punctuation if c != "_"]
 punctuation += [""", "–", ",", "…", """, "–"]
 
-
+# bẻ câu thành từng đoạn
 def sub_sentence(sentence):
     sent = []
 
@@ -56,12 +57,15 @@ def compute_ngram_list(segmentised_doc, ngram_n, stopwords_ls, subsentences=True
 
     ngram_list = []
     for sentence in output_sub_sentences:
-        sent = sentence.split()
+        sent = sentence.split() #cắt dựa vào khoảng trắng
+
+        # windown sliding
         for i in range(len(sent) - ngram_n + 1):
             ngram = ' '.join(sent[i:i + ngram_n])
             if ngram not in ngram_list and not check_for_stopwords(ngram, stopwords_ls):
                 ngram_list.append(ngram)
 
+    #lọc ngram có số
     final_ngram_list = []
     for ngram in ngram_list:
         contains_number = False
@@ -78,146 +82,68 @@ def compute_ngram_list(segmentised_doc, ngram_n, stopwords_ls, subsentences=True
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b))
 
-
-def get_doc_embeddings(segmentised_doc, tokenizer, phobert, stopwords):
-    doc_embedding = torch.zeros(size=(len(segmentised_doc), 768))
-
-    for i, sentence in enumerate(segmentised_doc):
-        sent_removed_stopwords = ' '.join([word for word in sentence.split() if word not in stopwords])
-
-        sentence_embedding = tokenizer.encode(sent_removed_stopwords, truncation=True, max_length=256)
-        input_ids = torch.tensor([sentence_embedding])
-        with torch.no_grad():
-            features = phobert(input_ids)
-
-        if i == 0:
-            doc_embedding[i, :] = 2 * features.pooler_output.flatten()
-        else:
-            doc_embedding[i, :] = features.pooler_output.flatten()
-
-    return torch.mean(doc_embedding, axis=0)
-
-
+# segment văn bản
 def get_segmentised_doc(nlp, rdrsegmenter, title, doc):
-    segmentised_doc = rdrsegmenter.word_segment(doc)
+    segmentised_doc = rdrsegmenter.word_segment(doc)    #mỗi item là 1 câu được word segment
 
     if title is not None:
         segmentised_doc = rdrsegmenter.word_segment(title) + rdrsegmenter.word_segment(doc)
-    ne_ls = set(get_named_entities(nlp, doc))
 
-    segmentised_doc_ne = []
+    ne_ls = set(get_named_entities(nlp, doc))   #entities list
+
+    segmentised_doc_ne = [] #clear document với word_segment và ner chuẩn
     for sent in segmentised_doc:
         for ne in ne_ls:
-            sent = sent.replace(ne, '_'.join(ne.split()))
+            words = ne.split()
+            pattern = r'[ _]'.join(map(re.escape, words))
+            replacement = '_'.join(words)
+
+            sent = re.sub(pattern, replacement, sent)   #tìm trong sent các pattern rồi thay bằng replacement
+
         segmentised_doc_ne.append(sent)
     return ne_ls, segmentised_doc_ne
 
-
-def compute_ngram_embeddings(tokenizer, phobert, ngram_list):
-    ngram_embeddings = {}
-
-    for ngram in ngram_list:
-        ngram_copy = ngram
-        if ngram.isupper():
-            ngram_copy = ngram.lower()
-        word_embedding = tokenizer.encode(ngram_copy, truncation=True, max_length=256)
-        input_ids = torch.tensor([word_embedding])
-        with torch.no_grad():
-            word_features = phobert(input_ids)
-
-        ngram_embeddings[ngram] = word_features.pooler_output
-    return ngram_embeddings
-
-
-# ── Asymmetric embedding (SentenceTransformer) ──
-
+# emb văn bản
 def get_doc_embeddings_asymm(segmentised_doc, sentence_model, stopwords):
-    """Tính doc embedding dùng SentenceTransformer (asymmetric_emb).
-    Mỗi câu được pyvi-tokenize trước khi encode.
-    Câu đầu tiên (title nếu có) được nhân đôi trọng số.
-    """
     embeddings = []
     weights = []
 
     for i, sentence in enumerate(segmentised_doc):
-        sent_tokenized = pyvi_tokenize(sentence)  # encode toàn câu, không lọc stopword
+        sent_tokenized = pyvi_tokenize(sentence)  # encode toàn câu
         emb = sentence_model.encode([sent_tokenized], normalize_embeddings=True)[0]  # shape [dim]
         embeddings.append(emb)
         weights.append(2.0 if i == 0 else 1.0)  # title có trọng số x2
 
     weights = np.array(weights)
     embeddings = np.array(embeddings)  # [n, dim]
-    # Weighted average
+    # tính trung bình có trọng số theo từng cột
     doc_emb = np.average(embeddings, axis=0, weights=weights)
     return doc_emb  # numpy array [dim]
 
-
+# emb ngram
 def compute_ngram_embeddings_asymm(sentence_model, ngram_list):
-    """Tính ngram embeddings dùng SentenceTransformer (asymmetric_emb).
-    Mỗi ngram được pyvi-tokenize trước khi encode.
-    """
     ngram_embeddings = {}
 
     for ngram in ngram_list:
         ngram_copy = ngram.lower() if ngram.isupper() else ngram
         ngram_tokenized = pyvi_tokenize(ngram_copy)
-        emb = sentence_model.encode([ngram_tokenized], normalize_embeddings=True)[0]  # [dim]
-        ngram_embeddings[ngram] = emb  # numpy array
+        emb = sentence_model.encode([ngram_tokenized], normalize_embeddings=True)[0]
+        ngram_embeddings[ngram] = emb
 
     return ngram_embeddings
 
-
+# cosine similarity ngram emb - doc emb
 def compute_ngram_similarity_asymm(ngram_list, ngram_embeddings, doc_embedding):
-    """Tính cosine similarity giữa ngram và doc embedding (numpy arrays)."""
+
     ngram_similarity_dict = {}
 
     for ngram in ngram_list:
-        a = ngram_embeddings[ngram]  # numpy [dim]
-        b = doc_embedding            # numpy [dim]
+        a = ngram_embeddings[ngram]
+        b = doc_embedding
         similarity_score = cosine_similarity(a, b)
         ngram_similarity_dict[ngram] = float(similarity_score)
 
     return ngram_similarity_dict
-
-
-def compute_ngram_similarity(ngram_list, ngram_embeddings, doc_embedding):
-    ngram_similarity_dict = {}
-
-    for ngram in ngram_list:
-        a = ngram_embeddings[ngram].flatten().detach().cpu().numpy()
-        b = doc_embedding.flatten().detach().cpu().numpy()
-        similarity_score = cosine_similarity(a, b).flatten()[0]
-        ngram_similarity_dict[ngram] = similarity_score
-
-    return ngram_similarity_dict
-
-
-def diversify_result_kmeans(ngram_result, ngram_embeddings, top_n=5):
-    best_ngrams = sorted(ngram_result, key=ngram_result.get, reverse=True)[:top_n * 4]
-    best_ngram_embeddings = np.array([ngram_embeddings[ngram] for ngram in best_ngrams]).squeeze()
-    vote = {}
-
-    for niter in range(100):
-        kmeans = KMeans(n_clusters=top_n, init='k-means++', random_state=niter * 2, n_init="auto").fit(
-            best_ngram_embeddings)
-        kmeans_result = kmeans.labels_
-
-        res = {}
-        for i in range(len(kmeans_result)):
-            if kmeans_result[i] not in res:
-                res[kmeans_result[i]] = []
-            res[kmeans_result[i]].append((best_ngrams[i], ngram_result[best_ngrams[i]]))
-
-        final_result = [res[k][0] for k in res]
-        for keyword in final_result:
-            if keyword not in vote:
-                vote[keyword] = 0
-            vote[keyword] += 1
-
-    diversify_result_ls = sorted(vote, key=vote.get, reverse=True)
-
-    return diversify_result_ls[:top_n]
-
 
 def mmr(
     doc_embedding: np.ndarray,
@@ -226,37 +152,19 @@ def mmr(
     top_n: int = 5,
     diversity: float = 0.8,
 ) -> List[Tuple[str, float]]:
-    """Calculate Maximal Marginal Relevance (MMR)
-    between candidate keywords and the document.
 
-    MMR considers the similarity of keywords/keyphrases with the
-    document, along with the similarity of already selected
-    keywords and keyphrases. This results in a selection of keywords
-    that maximize their within diversity with respect to the document.
-
-    Arguments:
-        doc_embedding: The document embeddings (shape: [1, dim] or [dim])
-        word_embeddings: The embeddings of candidate keywords/phrases (shape: [n, dim])
-        words: The candidate keywords/keyphrases
-        top_n: The number of keywords/keyphrases to return
-        diversity: How diverse the selected keywords/keyphrases are.
-                   Values between 0 and 1; 0 = not diverse, 1 = most diverse.
-
-    Returns:
-        List[Tuple[str, float]]: Selected keywords/keyphrases with their cosine similarity scores
-    """
     if len(words) == 0:
         return []
 
-    # Ensure doc_embedding is 2-D: shape [1, dim]
+    # kiểm tra mảng 2 chiều (cho sklearn)
     if doc_embedding.ndim == 1:
         doc_embedding = doc_embedding.reshape(1, -1)
 
-    # Extract similarity within words, and between words and the document
+    # tính simi giữa từ - từ, từ - văn bản
     word_doc_similarity = sklearn_cosine_similarity(word_embeddings, doc_embedding)  # [n, 1]
     word_similarity = sklearn_cosine_similarity(word_embeddings)                     # [n, n]
 
-    # Initialise: pick the candidate most similar to the document
+    # top1: simi với văn bản nhất
     keywords_idx = [int(np.argmax(word_doc_similarity))]
     candidates_idx = [i for i in range(len(words)) if i != keywords_idx[0]]
 
@@ -264,34 +172,35 @@ def mmr(
         if not candidates_idx:
             break
 
-        # Similarity between remaining candidates and the document
+        # lấy simi còn lại - văn bản tìm top 2,3,4....
         candidate_similarities = word_doc_similarity[candidates_idx, :]  # [c, 1]
 
-        # Maximum similarity between remaining candidates and already-selected keywords
+        # simi lớn nhất giữa hiện tại và danh sách top đã chọn trên matrix từ-từ, tính theo hàng
         target_similarities = np.max(
             word_similarity[candidates_idx][:, keywords_idx], axis=1
-        )  # [c]
+        )
 
-        # MMR score: balance relevance vs. diversity
+        # MMR score: đa dạng x liên quan
         mmr_scores = (
             (1 - diversity) * candidate_similarities
             - diversity * target_similarities.reshape(-1, 1)
-        )  # [c, 1]
+        )
 
+        # index của candidate hiện tại
         mmr_idx = candidates_idx[int(np.argmax(mmr_scores))]
 
         keywords_idx.append(mmr_idx)
         candidates_idx.remove(mmr_idx)
 
-    # Return keywords sorted by descending document similarity
+    # lấy từ khóa từ index
     keywords = [
         (words[idx], round(float(word_doc_similarity.reshape(1, -1)[0][idx]), 4))
         for idx in keywords_idx
     ]
-    keywords = sorted(keywords, key=itemgetter(1), reverse=True)
+    keywords = sorted(keywords, key=itemgetter(1), reverse=True)    # xếp điểm số giảm dần
     return keywords
 
-
+# xóa các n-gram giống nhau
 def remove_duplicates(ngram_result):
     to_remove = set()
     for ngram in ngram_result:
@@ -307,7 +216,7 @@ def remove_duplicates(ngram_result):
         ngram_result.pop(ngram)
     return ngram_result
 
-
+# lọc từ dựa trên Từ loại
 def compute_filtered_text(annotator, title, text):
     annotated = annotator.annotate_text(text)
     if title is not None:
@@ -319,20 +228,20 @@ def compute_filtered_text(annotator, title, text):
         filtered_sentences.append(sent)
     return filtered_sentences
 
-
+# đảm bảo các ngram thỏa mãn: lọc post và thực sự đi cùng với nhau thành cụm
 def get_candidate_ngrams(segmentised_doc, filtered_segmentised_doc, ngram_n, stopwords_ls):
-    # get actual ngrams
+    # danh sách câu word_segment chưa được lọc
     actual_ngram_list = compute_ngram_list(segmentised_doc, ngram_n, stopwords_ls, subsentences=True)
 
-    # get filtered ngrams
+    # danh sách câu word_segment và lọc POS
     filtered_ngram_list = compute_ngram_list(filtered_segmentised_doc, ngram_n, stopwords_ls,
                                              subsentences=False)
 
-    # get candiate ngrams
+    # lấy phần giao
     candidate_ngram = [ngram for ngram in filtered_ngram_list if ngram in actual_ngram_list]
     return candidate_ngram
 
-
+# đếm tần suất bằng sliding windown
 def limit_minimum_frequency(doc_segmentised, ngram_list, min_freq=1):
     ngram_dict_freq = {}
     for ngram in ngram_list:
@@ -360,3 +269,81 @@ def remove_overlapping_ngrams(ngram_list):
     for kw in to_remove:
         ngram_list.remove(kw)
     return ngram_list
+
+
+# def get_doc_embeddings(segmentised_doc, tokenizer, phobert, stopwords):
+#     doc_embedding = torch.zeros(size=(len(segmentised_doc), 768))
+
+#     for i, sentence in enumerate(segmentised_doc):
+#         sent_removed_stopwords = ' '.join([word for word in sentence.split() if word not in stopwords])
+
+#         sentence_embedding = tokenizer.encode(sent_removed_stopwords, truncation=True, max_length=256)
+#         input_ids = torch.tensor([sentence_embedding])
+#         with torch.no_grad():
+#             features = phobert(input_ids)
+
+#         if i == 0:
+#             doc_embedding[i, :] = 2 * features.pooler_output.flatten()
+#         else:
+#             doc_embedding[i, :] = features.pooler_output.flatten()
+
+#     return torch.mean(doc_embedding, axis=0)
+
+# ----------------------------------------------------------------------------------------
+
+# def diversify_result_kmeans(ngram_result, ngram_embeddings, top_n=5):
+#     best_ngrams = sorted(ngram_result, key=ngram_result.get, reverse=True)[:top_n * 4]
+#     best_ngram_embeddings = np.array([ngram_embeddings[ngram] for ngram in best_ngrams]).squeeze()
+#     vote = {}
+
+#     for niter in range(100):
+#         kmeans = KMeans(n_clusters=top_n, init='k-means++', random_state=niter * 2, n_init="auto").fit(
+#             best_ngram_embeddings)
+#         kmeans_result = kmeans.labels_
+
+#         res = {}
+#         for i in range(len(kmeans_result)):
+#             if kmeans_result[i] not in res:
+#                 res[kmeans_result[i]] = []
+#             res[kmeans_result[i]].append((best_ngrams[i], ngram_result[best_ngrams[i]]))
+
+#         final_result = [res[k][0] for k in res]
+#         for keyword in final_result:
+#             if keyword not in vote:
+#                 vote[keyword] = 0
+#             vote[keyword] += 1
+
+#     diversify_result_ls = sorted(vote, key=vote.get, reverse=True)
+
+#     return diversify_result_ls[:top_n]
+
+
+# ----------------------------------------------------------------------------------------
+
+# def compute_ngram_embeddings(tokenizer, phobert, ngram_list):
+#     ngram_embeddings = {}
+
+#     for ngram in ngram_list:
+#         ngram_copy = ngram
+#         if ngram.isupper():
+#             ngram_copy = ngram.lower()
+#         word_embedding = tokenizer.encode(ngram_copy, truncation=True, max_length=256)
+#         input_ids = torch.tensor([word_embedding])
+#         with torch.no_grad():
+#             word_features = phobert(input_ids)
+
+#         ngram_embeddings[ngram] = word_features.pooler_output
+#     return ngram_embeddings
+
+# ----------------------------------------------------------------------------------------
+
+# def compute_ngram_similarity(ngram_list, ngram_embeddings, doc_embedding):
+#     ngram_similarity_dict = {}
+
+#     for ngram in ngram_list:
+#         a = ngram_embeddings[ngram].flatten().detach().cpu().numpy()
+#         b = doc_embedding.flatten().detach().cpu().numpy()
+#         similarity_score = cosine_similarity(a, b).flatten()[0]
+#         ngram_similarity_dict[ngram] = similarity_score
+
+#     return ngram_similarity_dict
